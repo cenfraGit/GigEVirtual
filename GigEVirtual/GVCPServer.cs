@@ -30,6 +30,8 @@ internal class GVCPServer
             var result = await client.ReceiveAsync();
             byte[] data = result.Buffer;
 
+            //PrintConsole($"RAW recv from {result.RemoteEndPoint}: {data.Length} bytes, first byte = 0x{(data.Length > 0 ? data[0] : 0):X2}");
+
             // note: use short/ushort for 2 bytes, uint/int for 4 bytes
 
             // now we'll validate gvcp command header. the gigevision spec provides
@@ -88,7 +90,13 @@ internal class GVCPServer
             switch (command)
             {
                 case GVCPMessages.DISCOVERY_CMD:
-                    ack = BuildDiscoveryAck(req_id, result.RemoteEndPoint.Address);
+
+                    // resolve routing for the ack reply
+                    using (var probeSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+                    {
+                    probeSocket.Connect(result.RemoteEndPoint.Address, 3956);
+                    ack = BuildDiscoveryAck(req_id, ((IPEndPoint)probeSocket.LocalEndPoint!).Address);
+                    }
                     // send ack to whoever asked
                     await client.SendAsync(ack, ack.Length, result.RemoteEndPoint);
                     PrintAck(GVCPMessages.DISCOVERY_ACK, GVCPStatus.GEV_STATUS_SUCCESS, ack.Length);
