@@ -6,7 +6,9 @@
 // --------------------------------------------------------------------------------
 
 using System.Buffers.Binary;
+using System.Net;
 using System.Net.Sockets;
+using System.Text;
 
 namespace GigEVirtual;
 
@@ -59,8 +61,8 @@ internal class GVCPServer
                 $"length={length} " +
                 $"req_id={req_id}");
 
-            // gigespec says if recipient does not support command, return GEV_STATUS_NOT_IMPLEMENTED
-            // via ack
+            // now we'll build the ack depending on the cmd
+            byte[] ack;
 
             // helper method to print what ack was sent
             void PrintAck(ushort ackCode, ushort statusCode, int length) =>
@@ -68,6 +70,20 @@ internal class GVCPServer
                 $"{GVCPMessages.GetName(ackCode)} (0x{ackCode:X4}) " +
                 $"{GVCPStatus.GetName(statusCode)} (0x{statusCode:X4}) " +
                 $"length={length}");
+
+            switch (command)
+            {
+                case GVCPMessages.DISCOVERY_CMD:
+                    ack = BuildDiscoveryAck(req_id, result.RemoteEndPoint.Address);
+                    // send ack to whoever asked
+                    await client.SendAsync(ack, ack.Length, result.RemoteEndPoint);
+                    PrintAck(GVCPMessages.DISCOVERY_ACK, GVCPStatus.GEV_STATUS_SUCCESS, ack.Length);
+                    break;
+                default:
+                    // must return GEV_STATUS_NOT_IMPLEMENTED via ack?
+                    ack = null;
+                    break;
+            }
         }
     }
 
@@ -76,4 +92,129 @@ internal class GVCPServer
     // this prints to the console. prepends "GVCP: " to message
     private static void PrintConsole(string message) =>
         Console.WriteLine($"GVCP: {message}");
+
+    // --------------------------------------------------------------- ack builder methods
+
+    private static byte[] BuildDiscoveryAck(ushort req_id, IPAddress localIp)
+    {
+        // first we'll build the payload, then the header
+
+        byte[] ack = new byte[8 + 248];
+        int offset = 8; // skip header initially
+
+        // ------------------------------------------ payload (248 bytes total)
+
+        // spec_version_major (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), 0x0002);
+        offset += 2;
+
+        // spec_version_minor (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), 0x0002);
+        offset += 2;
+
+        // device_mode (4 bytes)
+        BinaryPrimitives.WriteUInt32BigEndian(ack.AsSpan(offset, 4), 0x00000001);
+        offset += 4;
+
+        // reserved (2 bytes)
+        offset += 2;
+
+        // device_MAC_address (high) (2 bytes)
+        // device_MAC_address (low) (4 bytes)
+        byte[] mac = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05 };
+        Array.Copy(sourceArray: mac,
+                   sourceIndex: 0,
+                   destinationArray: ack,
+                   destinationIndex: offset,
+                   length: 6);
+        offset += 6;
+
+        // IP_config_options (4 bytes)
+        // from network interface configuration registers (bootstrap):
+        // bit 29, 30, 31: LLA, DHCP, Persistent_IP, respectively.
+        // I guess all three should be supported, so 111
+        BinaryPrimitives.WriteUInt32BigEndian(ack.AsSpan(offset, 4), 0x00000007);
+        offset += 4;
+
+        // IP_config_current (4 bytes)
+        // set it to persistent? (bit 31)
+        BinaryPrimitives.WriteUInt32BigEndian(ack.AsSpan(offset, 4), 0x00000001);
+        offset += 4;
+
+        // reserved (4 + 4 + 4 = 12 bytes)
+        offset += 12;
+
+        // current_IP (4 bytes)
+        byte[] current_IP = localIp.GetAddressBytes();
+        Array.Copy(current_IP, 0, ack, offset, current_IP.Length);
+        offset += 4;
+
+        // reserved (4 + 4 + 4 = 12 bytes)
+        offset += 12;
+
+        // current_subnet_mask (4 bytes)
+        BinaryPrimitives.WriteUInt32BigEndian(ack.AsSpan(offset, 4), 0xFFFFFF00); // 255.255.255.0
+        offset += 4;
+
+        // reserved (4 + 4 + 4 = 12 bytes)
+        offset += 12;
+
+        // default_gateway (4 bytes)
+        byte[] default_gateway = IPAddress.Parse("192.168.1.1").GetAddressBytes();
+        Array.Copy(default_gateway, 0, ack, offset, default_gateway.Length);
+        offset += 4;
+
+        // manufacturer_name (32 bytes)
+        byte[] manufacturer_name = Encoding.ASCII.GetBytes("VIRTUAL");
+        Array.Copy(manufacturer_name, 0, ack, offset, manufacturer_name.Length);
+        offset += 32;
+
+        // model_name (32 bytes)
+        byte[] model_name = Encoding.ASCII.GetBytes("MODEL");
+        Array.Copy(model_name, 0, ack, offset, model_name.Length);
+        offset += 32;
+
+        // device_version (32 bytes)
+        byte[] device_version = Encoding.ASCII.GetBytes("1.0");
+        Array.Copy(device_version, 0, ack, offset, device_version.Length);
+        offset += 32;
+
+        // manufacturer_specific_information (48 bytes)
+        byte[] manufacturer_specific_information = Encoding.ASCII.GetBytes("C# GigEVision Cam");
+        Array.Copy(manufacturer_specific_information, 0, ack, offset, manufacturer_specific_information.Length);
+        offset += 48;
+
+        // serial_number (16 bytes)
+        byte[] serial_number = Encoding.ASCII.GetBytes("S0001");
+        Array.Copy(serial_number, 0, ack, offset, serial_number.Length);
+        offset += 16;
+
+        // user_defined_name (16 bytes)
+        byte[] user_defined_name = Encoding.ASCII.GetBytes("virtualDev");
+        Array.Copy(user_defined_name, 0, ack, offset, user_defined_name.Length);
+        //offset += 16;
+
+        // ------------------------------------------ header (8 bytes)
+
+        // reset offset
+        offset = 0;
+
+        // status (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), GVCPStatus.GEV_STATUS_SUCCESS);
+        offset += 2;
+
+        // answer (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), GVCPMessages.DISCOVERY_ACK);
+        offset += 2;
+
+        // length (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), (ushort)248);
+        offset += 2;
+
+        // ack_id (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), req_id);
+        //offset += 2;
+
+        return ack;
+    }
 }
