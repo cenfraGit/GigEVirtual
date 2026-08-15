@@ -45,6 +45,8 @@ internal class GVCPServer
             if (data.Length < 8)
                 continue;
 
+            // ------------------------------------------ header values
+
             // capture the rest of the header values:
             byte firstByte = data[0];
             byte flag = data[1];
@@ -52,17 +54,24 @@ internal class GVCPServer
             ushort length = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(4, 2));
             ushort req_id = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(6, 2));
 
+            // payload
+            ReadOnlySpan<byte> payload = data.AsSpan(8);
+
             // gigevision says discard if first byte is not 0x42:
             if (firstByte != 0x42)
                 continue;
+
+            // we might as well check if payload matches length
+            if (payload.Length != length)
+            {
+                PrintConsole($"Wrong payload length: header says: {length}, actual is {payload.Length}");
+                continue;
+            }
 
             PrintConsole($"CMD from {result.RemoteEndPoint,-21}: " +
                 $"{GVCPMessages.GetName(command)} (0x{command:X4}) " +
                 $"length={length} " +
                 $"req_id={req_id}");
-
-            // now we'll build the ack depending on the cmd
-            byte[] ack;
 
             // helper method to print what ack was sent
             void PrintAck(ushort ackCode, ushort statusCode, int length) =>
@@ -70,6 +79,11 @@ internal class GVCPServer
                 $"{GVCPMessages.GetName(ackCode)} (0x{ackCode:X4}) " +
                 $"{GVCPStatus.GetName(statusCode)} (0x{statusCode:X4}) " +
                 $"length={length}");
+
+            // ------------------------------------------ CMD check
+
+            // now we'll build the ack depending on the cmd
+            byte[] ack;
 
             switch (command)
             {
