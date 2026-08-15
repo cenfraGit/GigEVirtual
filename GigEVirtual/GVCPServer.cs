@@ -94,12 +94,31 @@ internal class GVCPServer
                     // resolve routing for the ack reply
                     using (var probeSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
                     {
-                    probeSocket.Connect(result.RemoteEndPoint.Address, 3956);
-                    ack = BuildDiscoveryAck(req_id, ((IPEndPoint)probeSocket.LocalEndPoint!).Address);
+                        probeSocket.Connect(result.RemoteEndPoint.Address, 3956);
+                        ack = BuildDiscoveryAck(req_id, ((IPEndPoint)probeSocket.LocalEndPoint!).Address);
                     }
                     // send ack to whoever asked
                     await client.SendAsync(ack, ack.Length, result.RemoteEndPoint);
                     PrintAck(GVCPMessages.DISCOVERY_ACK, GVCPStatus.GEV_STATUS_SUCCESS, ack.Length);
+                    break;
+                case GVCPMessages.READREG_CMD:
+                    // READREG_CMD payload consists of one or more register addresses.
+                    // we'll use the length in the header (which is payload header)
+                    // to determine how many addresses to read (4 bytes per address)
+                    int numAddresses = length / 4;
+
+                    // now use numAddresses to get list of addresses to read:
+                    uint[] addresses = new uint[numAddresses];
+                    int offset = 0;
+                    for (int i = 0; i < numAddresses; i++)
+                    {
+                        addresses[i] = BinaryPrimitives.ReadUInt32BigEndian(payload.Slice(offset, 4));
+                        offset += 4;
+                    }
+
+                    ack = BuildReadRegAck(req_id, addresses, deviceState);
+                    await client.SendAsync(ack, ack.Length, result.RemoteEndPoint);
+                    PrintAck(GVCPMessages.READREG_ACK, GVCPStatus.GEV_STATUS_SUCCESS, ack.Length);
                     break;
                 default:
                     // must return GEV_STATUS_NOT_IMPLEMENTED via ack?
@@ -234,6 +253,55 @@ internal class GVCPServer
         offset += 2;
 
         // ack_id (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), req_id);
+        //offset += 2;
+
+        return ack;
+    }
+
+    private static byte[] BuildReadRegAck(ushort req_id, uint[] addresses, DeviceState deviceState)
+    {
+        // header (8 bytes) + (4 bytes per address)
+        byte[] ack = new byte[8 + (4 * addresses.Length)];
+
+        // ------------------------------------------ payload
+
+        int offset = 8; // skip header first
+
+        // value read from register should be 4 bytes
+        byte[] value = new byte[4];
+
+        // read each value from address and copy to array
+        foreach (var address in addresses)
+        {
+            if (!deviceState.TryRegisterRead(address, out value))
+            {
+                continue; // dont write anything
+            }
+
+            Array.Copy(value, 0, ack, offset, 4);
+
+            offset += 4;
+        }
+
+        // ------------------------------------------ header
+
+        // reset to write header
+        offset = 0;
+
+        // status (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), GVCPStatus.GEV_STATUS_SUCCESS);
+        offset += 2;
+
+        // acknowledge (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), GVCPMessages.READREG_ACK);
+        offset += 2;
+
+        // length
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), (ushort)(4 * addresses.Length));
+        offset += 2;
+
+        // ack_id
         BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), req_id);
         //offset += 2;
 
