@@ -54,11 +54,20 @@ internal class GVCPServer
             if (firstByte != 0x42)
                 continue;
 
-            PrintConsole($"CMD from {result.RemoteEndPoint}: cmd=0x{command:X4} length={length} req_id={req_id}");
+            PrintConsole($"CMD from {result.RemoteEndPoint,-21}: " +
+                $"{GVCPMessages.GetName(command)} (0x{command:X4}) " +
+                $"length={length} " +
+                $"req_id={req_id}");
 
             // gigespec says if recipient does not support command, return GEV_STATUS_NOT_IMPLEMENTED
             // via ack
 
+            // helper method to print what ack was sent
+            void PrintAck(ushort ackCode, ushort statusCode, int length) =>
+                PrintConsole($"SENT to  {result.RemoteEndPoint,-21}: " +
+                $"{GVCPMessages.GetName(ackCode)} (0x{ackCode:X4}) " +
+                $"{GVCPStatus.GetName(statusCode)} (0x{statusCode:X4}) " +
+                $"length={length}");
         }
     }
 
