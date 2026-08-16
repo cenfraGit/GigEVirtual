@@ -121,6 +121,18 @@ internal class GVCPServer
                     ack = BuildReadRegAck(req_id, addresses, deviceState);
                     await client.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
+                case GVCPMessages.WRITEREG_CMD:
+                    // WRITEREG_CMD payload consists of pairs of address + data,
+                    // so layout looks like:
+                    // register_address
+                    // register_data
+                    // register_address
+                    // register_data
+
+                    // we'll do the logic in the write reg method
+                    ack = BuildWriteRegAck(req_id, payload, deviceState);
+                    await client.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
+                    break;
                 case GVCPMessages.READMEM_CMD:
                     // from payload: "address" (4 bytes) is the starting address
                     offset = 0;
@@ -356,6 +368,78 @@ internal class GVCPServer
         //offset += 2;
 
         return new Ack(GVCPMessages.READREG_ACK, readRegisterResult, ack);
+    }
+
+    private static Ack BuildWriteRegAck(ushort req_id, ReadOnlySpan<byte> payload, DeviceState deviceState)
+    {
+        // header (8 bytes) + 4 bytes per item in payload
+        byte[] ack = new byte[8 + 4];
+        int offset = 8;
+
+        // ------------------------------------------ payload
+
+        ushort status = GVCPStatus.GEV_STATUS_INVALID_ADDRESS;
+
+        // each pair is a register_address, then register_data
+        uint register_address, register_data;
+
+        // payload / 4 = actual uints. / 2 because pairs
+        int numberOfRegisters = payload.Length / 4 / 2;
+        // different offset for reading from payload
+        int offsetForReading = 0;
+
+        for (int i = 0; i < numberOfRegisters; i++)
+        {
+            register_address = BinaryPrimitives.ReadUInt32BigEndian(payload.Slice(offsetForReading, 4));
+            offsetForReading += 4;
+            register_data = BinaryPrimitives.ReadUInt32BigEndian(payload.Slice(offsetForReading, 4));
+            offsetForReading += 4;
+
+            // now we write the register value to device
+            status = deviceState.WriteRegister(register_address, BitConverter.GetBytes(register_data));
+            if (status != GVCPStatus.GEV_STATUS_SUCCESS)
+            {
+                break; // exit early, will be reported
+            }
+        }
+
+        // reserved (2 bytes)
+        // spec says set 0 on transmission, ignore on reception.
+        // so we'll set to 0?
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), 0x0000);
+        offset += 2;
+
+        // index (2 bytes)
+        // spec says on success, index indicates how many written successfully,
+        // on failure, indicates the index of the register in the list
+        // where the error occurred....... we'll assume all were successful
+        // TODO: writememory is using Array.Copy, so no direct way of knowing
+        // which one failed?
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), (ushort)numberOfRegisters);
+
+        // ------------------------------------------ header
+
+        // reset to write header
+        offset = 0;
+
+        // status (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), status);
+        offset += 2;
+
+        // acknowledge (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), GVCPMessages.WRITEREG_ACK);
+        offset += 2;
+
+        // length (2 bytes) (only payload): (reserved + index = 4 bytes)
+        ushort length = (status == GVCPStatus.GEV_STATUS_SUCCESS) ? (ushort)4 : (ushort)0;
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), length);
+        offset += 2;
+
+        // ack_id (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), req_id);
+        //offset += 2;
+
+        return new Ack(GVCPMessages.WRITEREG_ACK, status, ack);
     }
 
     private static Ack BuildReadMemAck(ushort req_id, uint address, ushort count, DeviceState deviceState)
