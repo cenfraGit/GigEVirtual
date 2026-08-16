@@ -13,6 +13,7 @@ using System.Text;
 namespace GigEVirtual;
 
 internal record Ack(ushort Message, ushort Status, byte[] Buffer);
+
 internal class GVCPServer
 {
     // --------------------------------------------------------------- fields and properties
@@ -118,6 +119,22 @@ internal class GVCPServer
                     }
 
                     ack = BuildReadRegAck(req_id, addresses, deviceState);
+                    await client.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
+                    break;
+                case GVCPMessages.READMEM_CMD:
+                    // from payload: "address" (4 bytes) is the starting address
+                    offset = 0;
+
+                    uint address = BinaryPrimitives.ReadUInt32BigEndian(payload.Slice(offset, 4));
+                    offset += 4;
+
+                    // reserved (2 bytes)
+                    offset += 2;
+
+                    // count (2 bytes)
+                    ushort count = BinaryPrimitives.ReadUInt16BigEndian(payload.Slice(offset, 2));
+
+                    ack = BuildReadMemAck(req_id, address, count, deviceState);
                     await client.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
                 default:
@@ -300,21 +317,66 @@ internal class GVCPServer
         offset = 0;
 
         // status (2 bytes)
-        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), GVCPStatus.GEV_STATUS_SUCCESS);
+        // note: its all or nothing, so if any operation fails, whole operation fails
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), readRegisterResult);
         offset += 2;
 
         // acknowledge (2 bytes)
         BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), GVCPMessages.READREG_ACK);
         offset += 2;
 
-        // length
-        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), (ushort)(4 * addresses.Length));
+        // length (2 bytes) (only payload)
+        // if not success, length will be 0
+        ushort length = (readRegisterResult == GVCPStatus.GEV_STATUS_SUCCESS) ? (ushort)(4 * addresses.Length) : (ushort)0;
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), length);
         offset += 2;
 
-        // ack_id
+        // ack_id (2 bytes)
         BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), req_id);
         //offset += 2;
 
-        return ack;
+        return new Ack(GVCPMessages.READREG_ACK, readRegisterResult, ack);
+    }
+
+    private static Ack BuildReadMemAck(ushort req_id, uint address, ushort count, DeviceState deviceState)
+    {
+        // header (8 bytes) + address (4 bytes) + (1 byte per data)
+        byte[] ack = new byte[8 + 4 + count];
+        int offset = 8;
+
+        // ------------------------------------------ payload
+
+        // first value is the address
+        BinaryPrimitives.WriteUInt32BigEndian(ack.AsSpan(offset, 4), address);
+        offset += 4;
+
+        // then just read memory and copy to ack payload section
+        ushort status = deviceState.ReadMemory(address, count, out byte[]? value);
+        if (status == GVCPStatus.GEV_STATUS_SUCCESS)
+            Array.Copy(value!, 0, ack, offset, value!.Length);
+
+        // ------------------------------------------ header
+
+        // reset to write header
+        offset = 0;
+
+        // status (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), status);
+        offset += 2;
+
+        // acknowledge (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), GVCPMessages.READMEM_ACK);
+        offset += 2;
+
+        // length (2 bytes) (only payload): address + 1 byte per data
+        ushort length = (status == GVCPStatus.GEV_STATUS_SUCCESS) ? (ushort)(4 + count) : (ushort)0;
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), length);
+        offset += 2;
+
+        // ack_id (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), req_id);
+        //offset += 2;
+
+        return new Ack(GVCPMessages.READMEM_ACK, status, ack);
     }
 }
