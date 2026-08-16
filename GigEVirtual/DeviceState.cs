@@ -41,19 +41,77 @@ internal class DeviceState
 
     // --------------------------------------------------------------- methods
 
-    public bool TryRegisterRead(uint address, out byte[]? value)
+    public ushort ReadMemory(uint address, ushort count, out byte[]? value)
+    {
+        // we'll lock the whole method so alignment/bounds don't change,
+        // for safer reading
+        lock (_registersLock)
+        {
+            // spec (READMEM section) says number of addresses read must
+            // be a multiple of 4, otherwise return bad alignment status
+            if (address % 4 != 0 || count % 4 != 0)
+            {
+                value = null;
+                return GVCPStatus.GEV_STATUS_BAD_ALIGNMENT;
+            }
+
+            // now we check for invalid address input
+            //
+            // {0} -> length 1
+            //
+            // if input is 0: valid
+            // if input is 1: invalid
+            // if input is 2: invalid
+            //
+            // {0, 1, 2} -> length 3
+            //
+            // if input 0: valid
+            // if input 1: valid
+            // if input 2: valid
+            // if input 3: invalid
+            //
+            // so input address must be less than length.
+            //
+            // but address is uint and count is ushort, if address is close to max
+            // and we add count, wrap around?
+
+            if (address > _memory.Length || count > _memory.Length - address)
+            {
+                value = null;
+                return GVCPStatus.GEV_STATUS_INVALID_ADDRESS;
+        }
+
+            value = _memory.AsSpan<byte>((int)address, (int)count).ToArray();
+            return GVCPStatus.GEV_STATUS_SUCCESS;
+    }
+    }
+
+    public ushort WriteMemory(uint address, byte[] value)
     {
         lock (_registersLock)
         {
-            return _registers.TryGetValue(address, out value);
+            if (address % 4 != 0 || value.Length % 4 != 0)
+            {
+                return GVCPStatus.GEV_STATUS_BAD_ALIGNMENT;
+            }
+
+            if (address > _memory.Length || value.Length > _memory.Length - address)
+            {
+                return GVCPStatus.GEV_STATUS_INVALID_ADDRESS;
+            }
+
+            Array.Copy(value, 0, _memory, (int)address, value.Length);
+            return GVCPStatus.GEV_STATUS_SUCCESS;
         }
     }
 
-    public void TryRegisterWrite(uint address, byte[] value)
+    public ushort ReadRegister(uint address, out byte[]? value)
     {
-        lock (_registersLock)
-        {
-            _registers[address] = value;
+        return ReadMemory(address, 4, out value);
         }
+
+    public ushort WriteRegister(uint address, byte[] value)
+    {
+        return WriteMemory(address, value);
     }
 }
