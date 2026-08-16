@@ -137,6 +137,26 @@ internal class GVCPServer
                     ack = BuildReadMemAck(req_id, address, count, deviceState);
                     await client.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
+                case GVCPMessages.WRITEMEM_CMD:
+
+                    // from payload: "address" (4 bytes) is the starting address
+                    offset = 0;
+
+                    uint addressToStartWritingTo = BinaryPrimitives.ReadUInt32BigEndian(payload.Slice(offset, 4));
+                    offset += 4;
+
+
+                    // length includes address (4 bytes) + 1 byte per data. so just iterate
+                    // over data
+                    byte[] dataToWrite = new byte[length - 4];
+                    for (int i = 0; i < (length - 4); i++)
+                    {
+                        dataToWrite[i] = payload[offset++];
+                    }
+
+                    ack = BuildWriteMemAck(req_id, addressToStartWritingTo, dataToWrite, deviceState);
+                    await client.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
+                    break;
                 default:
                     // must return GEV_STATUS_NOT_IMPLEMENTED via ack?
                     ack = null;
@@ -378,5 +398,55 @@ internal class GVCPServer
         //offset += 2;
 
         return new Ack(GVCPMessages.READMEM_ACK, status, ack);
+    }
+
+    private static Ack BuildWriteMemAck(ushort req_id, uint address, byte[] data, DeviceState deviceState)
+    {
+        // header (8 bytes) + address (4 bytes) + (1 byte per data)
+        byte[] ack = new byte[8 + data.Length];
+        int offset = 8;
+
+        // ------------------------------------------ payload
+
+        // first we'll actually write the data to device
+        ushort status = deviceState.WriteMemory(address, data);
+
+        // reserved (2 bytes)
+        // spec says set 0 on transmission, ignore on reception.
+        // so we'll set to 0?
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), 0x0000);
+        offset += 2;
+
+        // index (2 bytes)
+        // spec says on success, index indicates how many written successfully,
+        // on failure, indicates the index of the register in the list
+        // where the error occurred....... we'll assume all were successful
+        // TODO: writememory is using Array.Copy, so no direct way of knowing
+        // which one failed?
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), (ushort)data.Length);
+
+        // ------------------------------------------ header
+
+        // reset to write header
+        offset = 0;
+
+        // status (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), status);
+        offset += 2;
+
+        // acknowledge (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), GVCPMessages.WRITEMEM_ACK);
+        offset += 2;
+
+        // length (2 bytes) (only payload): address + 1 byte per data
+        ushort length = (status == GVCPStatus.GEV_STATUS_SUCCESS) ? (ushort)(4 + data.Length) : (ushort)0;
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), length);
+        offset += 2;
+
+        // ack_id (2 bytes)
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), req_id);
+        //offset += 2;
+
+        return new Ack(GVCPMessages.WRITEMEM_ACK, status, ack);
     }
 }
