@@ -403,7 +403,7 @@ internal class GVCPServer
     private static Ack BuildWriteMemAck(ushort req_id, uint address, byte[] data, DeviceState deviceState)
     {
         // header (8 bytes) + address (4 bytes) + (1 byte per data)
-        byte[] ack = new byte[8 + data.Length];
+        byte[] ack = new byte[8 + 4];
         int offset = 8;
 
         // ------------------------------------------ payload
@@ -438,8 +438,8 @@ internal class GVCPServer
         BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), GVCPMessages.WRITEMEM_ACK);
         offset += 2;
 
-        // length (2 bytes) (only payload): address + 1 byte per data
-        ushort length = (status == GVCPStatus.GEV_STATUS_SUCCESS) ? (ushort)(4 + data.Length) : (ushort)0;
+        // length (2 bytes) (only payload): (reserved + index = 4 bytes)
+        ushort length = (status == GVCPStatus.GEV_STATUS_SUCCESS) ? (ushort)4 : (ushort)0;
         BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), length);
         offset += 2;
 
