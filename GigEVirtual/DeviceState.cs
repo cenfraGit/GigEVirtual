@@ -1,7 +1,7 @@
 // --------------------------------------------------------------------------------
 // DeviceState.cs
 //
-// represents the virtual device state, accessed by HVCP and HVSP
+// represents the virtual device state, accessed by GVCP and GVSP
 // --------------------------------------------------------------------------------
 
 namespace GigEVirtual;

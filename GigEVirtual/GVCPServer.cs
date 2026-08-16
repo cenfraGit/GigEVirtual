@@ -103,7 +103,7 @@ internal class GVCPServer
                     break;
                 case GVCPMessages.READREG_CMD:
                     // READREG_CMD payload consists of one or more register addresses.
-                    // we'll use the length in the header (which is payload header)
+                    // we'll use the length in the header (which is payload length)
                     // to determine how many addresses to read (4 bytes per address)
                     int numAddresses = length / 4;
 
