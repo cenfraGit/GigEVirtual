@@ -5,6 +5,8 @@
 // manufacturer-specific registers, plus helper methods to read from these.
 // --------------------------------------------------------------------------------
 
+using System.Text;
+
 namespace GigEVirtual;
 
 internal class DeviceState
@@ -37,6 +39,35 @@ internal class DeviceState
 
     public DeviceState()
     {
+        // specify big endian at least
+        byte[] en = new byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(en, 0b10000000000000000000000000000000);
+        WriteMemory(0x0004, en);
+
+        byte[] width = new byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(width, 4);
+        byte[] height = new byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(height, 5);
+        byte[] pixelFormat = new byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(pixelFormat, 6);
+        WriteMemory(0xA000, width);
+        WriteMemory(0xA004, height);
+        WriteMemory(0xA008, pixelFormat);
+
+        static byte[] PadTo4ByteMultiple(byte[] data)
+        {
+            int paddedLength = ((data.Length + 3) / 4) * 4;
+            byte[] padded = new byte[paddedLength]; // extra bytes default to 0
+            Array.Copy(data, padded, data.Length);
+            return padded;
+        }
+
+        byte[] xmlBytes = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "GigEVirtual.xml"));
+        uint xmlAddress = 0xA200;
+        string firstUrl = $"Local:GigEVirtual.xml;{xmlAddress:x};{xmlBytes.Length:x}";
+
+        WriteMemory(xmlAddress, PadTo4ByteMultiple(xmlBytes));
+        WriteMemory(0x0200, PadTo4ByteMultiple(Encoding.ASCII.GetBytes(firstUrl)));
     }
 
     // --------------------------------------------------------------- methods
@@ -79,11 +110,11 @@ internal class DeviceState
             {
                 value = null;
                 return GVCPStatus.GEV_STATUS_INVALID_ADDRESS;
-        }
+            }
 
             value = _memory.AsSpan<byte>((int)address, (int)count).ToArray();
             return GVCPStatus.GEV_STATUS_SUCCESS;
-    }
+        }
     }
 
     public ushort WriteMemory(uint address, byte[] value)
@@ -108,7 +139,7 @@ internal class DeviceState
     public ushort ReadRegister(uint address, out byte[]? value)
     {
         return ReadMemory(address, 4, out value);
-        }
+    }
 
     public ushort WriteRegister(uint address, byte[] value)
     {

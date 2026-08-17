@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RegisterDescription
+    xmlns="http://www.genicam.org/GenApi/Version_1_1"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.genicam.org/GenApi/Version_1_1 http://www.genicam.org/GenApi/GenApiSchema_Version_1_1.xsd"
+    ModelName="MODEL"
+    VendorName="VIRTUAL"
+    ToolTip="Minimal simulated GigE Vision camera"
+    StandardNameSpace="None"
+    SchemaMajorVersion="1"
+    SchemaMinorVersion="1"
+    SchemaSubMinorVersion="0"
+    MajorVersion="1"
+    MinorVersion="0"
+    SubMinorVersion="0"
+    ProductGuid="9c6f6a2e-1b34-4a4f-8b6a-000000000001"
+    VersionGuid="9c6f6a2e-1b34-4a4f-8b6a-000000000002">
+
+	<Category Name="Root" NameSpace="Standard">
+		<Description>Root of the simulated camera's feature tree.</Description>
+		<Visibility>Beginner</Visibility>
+		<pFeature>ImageFormatControl</pFeature>
+	</Category>
+
+	<Category Name="ImageFormatControl">
+		<Description>Controls the format of the image being streamed.</Description>
+		<Visibility>Beginner</Visibility>
+		<pFeature>Width</pFeature>
+		<pFeature>Height</pFeature>
+		<pFeature>PixelFormat</pFeature>
+	</Category>
+
+	<IntReg Name="Width">
+		<Description>Width of the image in pixels.</Description>
+		<Visibility>Beginner</Visibility>
+		<Address>0xA000</Address>
+		<Length>4</Length>
+		<AccessMode>RW</AccessMode>
+		<pPort>Device</pPort>
+		<Min>64</Min>
+		<Max>1920</Max>
+		<Inc>4</Inc>
+		<Sign>Unsigned</Sign>
+		<Endianess>BigEndian</Endianess>
+	</IntReg>
+
+	<IntReg Name="Height">
+		<Description>Height of the image in pixels.</Description>
+		<Visibility>Beginner</Visibility>
+		<Address>0xA004</Address>
+		<Length>4</Length>
+		<AccessMode>RW</AccessMode>
+		<pPort>Device</pPort>
+		<Sign>Unsigned</Sign>
+		<Endianess>BigEndian</Endianess>
+	</IntReg>
+
+	<IntReg Name="PixelFormat">
+		<Description>Pixel format code of the streamed image.</Description>
+		<Visibility>Beginner</Visibility>
+		<Address>0xA008</Address>
+		<Length>4</Length>
+		<AccessMode>RW</AccessMode>
+		<pPort>Device</pPort>
+		<Sign>Unsigned</Sign>
+		<Endianess>BigEndian</Endianess>
+	</IntReg>
+
+	<Port Name="Device">
+		<Description>Represents the physical GVCP register access mechanism.</Description>
+		<Visibility>Invisible</Visibility>
+	</Port>
+
+</RegisterDescription>
