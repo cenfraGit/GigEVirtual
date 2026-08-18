@@ -98,7 +98,9 @@ internal class GVCPServer
                     using (var probeSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
                     {
                         probeSocket.Connect(result.RemoteEndPoint.Address, 3956);
-                        ack = BuildDiscoveryAck(req_id, ((IPEndPoint)probeSocket.LocalEndPoint!).Address);
+                        IPAddress ipLocal = ((IPEndPoint)probeSocket.LocalEndPoint!).Address;
+                        deviceState.SetIP(ipLocal);
+                        ack = BuildDiscoveryAck(req_id, ipLocal);
                     }
                     // send ack to whoever asked
                     await client.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);

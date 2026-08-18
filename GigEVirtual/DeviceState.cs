@@ -5,6 +5,7 @@
 // manufacturer-specific registers, plus helper methods to read from these.
 // --------------------------------------------------------------------------------
 
+using System.Net;
 using System.Text;
 
 namespace GigEVirtual;
@@ -39,38 +40,133 @@ internal class DeviceState
 
     public DeviceState()
     {
-        // specify big endian at least
-        byte[] en = new byte[4];
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(en, 0b10000000000000000000000000000000);
-        WriteMemory(0x0004, en);
+        // version
+        WriteMemoryUint(0x0000, 0x00020002); // version 2.2
 
-        byte[] width = new byte[4];
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(width, 4);
-        byte[] height = new byte[4];
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(height, 5);
-        byte[] pixelFormat = new byte[4];
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(pixelFormat, 6);
-        WriteMemory(0xA000, width);
-        WriteMemory(0xA004, height);
-        WriteMemory(0xA008, pixelFormat);
+        // device mode
+        uint deviceMode =
+            Pack(value: 1, specBitStart: 0, width: 1) | // endianness
+            Pack(value: 0, specBitStart: 1, width: 3) | // device_class (transmitter)
+            Pack(value: 0, specBitStart: 6, width: 2) | // current_link_configuration (single link config for now)
+            Pack(value: 2, specBitStart: 24, width: 8); // character_set_index
+        WriteMemoryUint(0x0004, deviceMode);
 
-        static byte[] PadTo4ByteMultiple(byte[] data)
-        {
-            int paddedLength = ((data.Length + 3) / 4) * 4;
-            byte[] padded = new byte[paddedLength]; // extra bytes default to 0
-            Array.Copy(data, padded, data.Length);
-            return padded;
-        }
+        // device mac address (high)
+        WriteMemoryUint(0x0008, 0x0000AABB);
 
-        byte[] xmlBytes = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "GigEVirtual.xml"));
+        // device mac address (low)
+        WriteMemoryUint(0x000C, 0xCCDDEEFF);
+
+        // network interface capability
+        uint networkInterfaceCapability =
+            Pack(0, specBitStart: 0, width: 1) | // PAUSE_reception
+            Pack(0, specBitStart: 1, width: 1) | // PAUSE_reneration
+            Pack(1, specBitStart: 29, width: 1) | // LLA
+            Pack(1, specBitStart: 30, width: 1) | // DHCP
+            Pack(1, specBitStart: 31, width: 1); // Persistent_IP
+        WriteMemoryUint(0x0010, networkInterfaceCapability);
+
+        // network interface configuration
+        uint networkInterfaceConfiguration =
+            Pack(0, specBitStart: 0, width: 1) | // PAUSE_reception
+            Pack(0, specBitStart: 1, width: 1) | // PAUSE_reneration
+            Pack(1, specBitStart: 29, width: 1) | // LLA
+            Pack(1, specBitStart: 30, width: 1) | // DHCP
+            Pack(1, specBitStart: 31, width: 1); // Persistent_IP
+        WriteMemoryUint(0x0014, networkInterfaceConfiguration);
+
+        // current IP address
+        //WriteMemory(0x0024, null);
+
+        // current subnet mask
+        WriteMemoryUint(0x0034, 0xFFFFFF00);
+
+        // current default gateway
+        byte[] default_gateway = IPAddress.Parse("192.168.1.1").GetAddressBytes();
+        WriteMemory(0x0044, default_gateway);
+
+        // manufacturer name
+        WriteMemoryString(0x0048, "VIRTUAL", 32);
+
+        // model name
+        WriteMemoryString(0x0068, "MODEL", 32);
+
+        // device version
+        WriteMemoryString(0x0088, "1.0", 32);
+
+        // manufacturer info
+        WriteMemoryString(0x00A8, "C# GigEVision Cam", 48);
+
+        // serial number register
+        WriteMemoryString(0x00D8, "S0001", 16);
+
+        // user-defined name
+        WriteMemoryString(0x00E8, "virtualDev", 16);
+
+        // number of network interfaces
+        WriteMemoryUint(0x0600, 1);
+
+        // gvsp capability
+        uint gvspCapability =
+            Pack(1, specBitStart: 0, width: 1) | // SCSPx is supported
+            Pack(0, specBitStart: 1, width: 1) | // legacy_16bit_block_id_supported
+            Pack(1, specBitStart: 2, width: 1) | // SCMBSx_supported
+            Pack(1, specBitStart: 3, width: 1);  // SCEBAx_supported
+        WriteMemoryUint(0x092C, gvspCapability);
+
+        // gvcp capability
+        // optional?
+        //WriteMemory(0x0934, null);
+
+        // heartbeat timeout
+        WriteMemoryUint(0x0938, 0x0BB8); // factory default
+
+        // control channel privilege
+        //WriteMemory(0x0A00, null);
+
+        // first url and xml
+        string xmlContent = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "GigEVirtual.xml"));
+        int xmlLength = Encoding.ASCII.GetBytes(xmlContent).Length;
         uint xmlAddress = 0xA200;
-        string firstUrl = $"Local:GigEVirtual.xml;{xmlAddress:x};{xmlBytes.Length:x}";
+        string firstUrl = $"Local:GigEVirtual.xml;{xmlAddress:x};{xmlLength:x}";
 
-        WriteMemory(xmlAddress, PadTo4ByteMultiple(xmlBytes));
-        WriteMemory(0x0200, PadTo4ByteMultiple(Encoding.ASCII.GetBytes(firstUrl)));
+        WriteMemoryString(xmlAddress, xmlContent, xmlLength);
+        WriteMemoryString(0x0200, firstUrl, 512);
+
+        // manufacturer-values
+        WriteMemoryUint(0xA000, 4); // width
+        WriteMemoryUint(0xA004, 5); // height
+        WriteMemoryUint(0xA008, 6); // pixelFormat
     }
 
     // --------------------------------------------------------------- methods
+
+    private static uint Pack(uint value, int specBitStart, int width)
+    {
+        int shift = 32 - specBitStart - width;
+        uint mask = (1u << width) - 1;
+        return (value & mask) << shift;
+    }
+
+    private ushort WriteMemoryString(uint address, string value, int registerLength)
+    {
+        int paddedLength = ((registerLength + 3) / 4) * 4;
+        byte[] buffer = new byte[paddedLength];
+        byte[] stringBytes = Encoding.ASCII.GetBytes(value);
+
+        // need to leave at least 1 byte for NULL terminator,
+        // so, maybe..
+
+        int copyLength = Math.Min(registerLength, stringBytes.Length);
+
+        if (copyLength >= registerLength && stringBytes.Length >= registerLength)
+            copyLength = registerLength;
+        else
+            copyLength = Math.Min(copyLength, registerLength - 1); // leave for null
+
+        Array.Copy(stringBytes, buffer, copyLength);
+        return WriteMemory(address, buffer);
+    }
 
     public ushort ReadMemory(uint address, ushort count, out byte[]? value)
     {
@@ -136,6 +232,13 @@ internal class DeviceState
         }
     }
 
+    public ushort WriteMemoryUint(uint address, uint value)
+    {
+        byte[] array = new byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(array, value);
+        return WriteMemory(address, array);
+    }
+
     public ushort ReadRegister(uint address, out byte[]? value)
     {
         return ReadMemory(address, 4, out value);
@@ -144,5 +247,11 @@ internal class DeviceState
     public ushort WriteRegister(uint address, byte[] value)
     {
         return WriteMemory(address, value);
+    }
+
+    // resolved from gvcp server, so server must set to device...
+    public void SetIP(IPAddress ipLocal)
+    {
+        WriteMemory(0x0024, ipLocal.GetAddressBytes());
     }
 }
