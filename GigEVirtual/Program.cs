@@ -13,7 +13,6 @@ internal class Program
         // create device
         DeviceState deviceState = new();
 
-        // start gvcp
-        await GVCPServer.Start(deviceState);
+        await GVCPServer.Start(deviceState, new GVSPTransmitter());
     }
 }

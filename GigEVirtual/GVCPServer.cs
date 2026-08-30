@@ -22,7 +22,7 @@ internal class GVCPServer
 
     // --------------------------------------------------------------- constructors
 
-    public static async Task Start(DeviceState deviceState)
+    public static async Task Start(DeviceState deviceState, GVSPTransmitter gvspTransmitter)
     {
         var client = new UdpClient(_port);
         PrintConsole($"Listening on UDP {_port}");
@@ -132,7 +132,7 @@ internal class GVCPServer
                     // register_data
 
                     // we'll do the logic in the write reg method
-                    ack = BuildWriteRegAck(req_id, payload, deviceState);
+                    ack = BuildWriteRegAck(req_id, payload, deviceState, gvspTransmitter);
                     await client.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
                 case GVCPMessages.READMEM_CMD:
@@ -372,7 +372,7 @@ internal class GVCPServer
         return new Ack(GVCPMessages.READREG_ACK, readRegisterResult, ack);
     }
 
-    private static Ack BuildWriteRegAck(ushort req_id, ReadOnlySpan<byte> payload, DeviceState deviceState)
+    private static Ack BuildWriteRegAck(ushort req_id, ReadOnlySpan<byte> payload, DeviceState deviceState, GVSPTransmitter gvspTransmitter)
     {
         // header (8 bytes) + 4 bytes per item in payload
         byte[] ack = new byte[8 + 4];
@@ -399,6 +399,19 @@ internal class GVCPServer
 
             // now we write the register value to device
             status = deviceState.WriteRegister(register_address, BitConverter.GetBytes(register_data));
+
+            // if the address matches addresses for Start/Stop acqsuitision
+            if (register_address == 0xA00C)
+            {
+                gvspTransmitter.StartAcquisition(deviceState);
+                deviceState.WriteRegister(register_address, [0]); // signal done
+            }
+            else if (register_address == 0xA010)
+            {
+                gvspTransmitter.StopAcquisition();
+                deviceState.WriteRegister(register_address, [0]); // signal done
+            }
+
             if (status != GVCPStatus.GEV_STATUS_SUCCESS)
             {
                 break; // exit early, will be reported

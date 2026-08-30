@@ -66,6 +66,38 @@
 		<Endianess>BigEndian</Endianess>
 	</IntReg>
 
+	<Command Name="AcquisitionStart">
+		<Description>Starts image acquisition/streaming.</Description>
+		<Visibility>Beginner</Visibility>
+		<pValue>AcquisitionStartReg</pValue>
+		<CommandValue>1</CommandValue>
+	</Command>
+
+	<IntReg Name="AcquisitionStartReg">
+		<Address>0xA00C</Address>
+		<Length>4</Length>
+		<AccessMode>RW</AccessMode>
+		<pPort>Device</pPort>
+		<Sign>Unsigned</Sign>
+		<Endianess>BigEndian</Endianess>
+	</IntReg>
+
+	<Command Name="AcquisitionStop">
+		<Description>Stops image acquisition/streaming.</Description>
+		<Visibility>Beginner</Visibility>
+		<pValue>AcquisitionStopReg</pValue>
+		<CommandValue>1</CommandValue>
+	</Command>
+
+	<IntReg Name="AcquisitionStopReg">
+		<Address>0xA010</Address>
+		<Length>4</Length>
+		<AccessMode>RW</AccessMode>
+		<pPort>Device</pPort>
+		<Sign>Unsigned</Sign>
+		<Endianess>BigEndian</Endianess>
+	</IntReg>
+
 	<Port Name="Device">
 		<Description>Represents the physical GVCP register access mechanism.</Description>
 		<Visibility>Invisible</Visibility>
