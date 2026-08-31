@@ -134,9 +134,9 @@ internal class DeviceState
         WriteMemoryString(0x0200, firstUrl, 512);
 
         // manufacturer-values
-        WriteMemoryUint(0xA000, 4); // width
-        WriteMemoryUint(0xA004, 5); // height
-        WriteMemoryUint(0xA008, 6); // pixelFormat
+        WriteMemoryUint(0xA000, 640); // width
+        WriteMemoryUint(0xA004, 480); // height
+        WriteMemoryUint(0xA008, GVSPPixelFormats.Mono8); // pixelFormat
     }
 
     // --------------------------------------------------------------- methods
