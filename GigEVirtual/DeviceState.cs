@@ -115,8 +115,10 @@ internal class DeviceState
         WriteMemoryUint(0x092C, gvspCapability);
 
         // gvcp capability
-        // optional?
-        //WriteMemory(0x0934, null);
+        uint gvcpCapability =
+            Pack(1, specBitStart: 0, width: 1) | // user_defined_name supported
+            Pack(1, specBitStart: 1, width: 1);  // serial_number supported
+        WriteMemoryUint(0x0934, gvcpCapability);
 
         // heartbeat timeout
         WriteMemoryUint(0x0938, 0x0BB8); // factory default
@@ -137,6 +139,43 @@ internal class DeviceState
         WriteMemoryUint(0xA000, 640); // width
         WriteMemoryUint(0xA004, 480); // height
         WriteMemoryUint(0xA008, GVSPPixelFormats.Mono8); // pixelFormat
+
+        // gvsp registers
+
+        // stream channel port 0 (scp0)
+        WriteMemoryUint(0x0D00, 0);
+
+        // stream channel packet size 0 (scps0)
+        uint packetSize = 1500;
+        WriteMemoryUint(0x0D04, packetSize);
+
+        // stream channel packet delay 0 (scpd0)
+        WriteMemoryUint(0x0D08, 0);
+
+        // stream channel destination address 0 (scda0)
+        WriteMemoryUint(0x0D18, 0);
+
+        // stream channel max block size 0 (scmbs0)
+        uint width = 4;
+        uint height = 5;
+        int bytesPerPixel = 1; // assuming mono8
+        ulong payloadSize = (ulong)(width * height * (ulong)bytesPerPixel);
+        WriteMemoryUint(0x0D34, (uint)(payloadSize >> 32));
+        WriteMemoryUint(0x0D38, (uint)(payloadSize & 0xFFFFFFFF));
+
+        // stream channel max packet count 0 (scmpc0)
+        uint overhead = 8;
+        uint maxPacketCount = (uint)Math.Ceiling((double)payloadSize / (packetSize - overhead)) + 2; // leader/trailer
+        WriteMemoryUint(0x0D30, maxPacketCount);
+
+        // stream channel extended bootstrap address 0 (sceba0)
+        WriteMemoryUint(0x0D3C, 0);
+
+        // number of message channels
+        WriteMemoryUint(0x0900, 0);
+
+        // number of stream channels
+        WriteMemoryUint(0x0904, 1);
     }
 
     // --------------------------------------------------------------- methods
