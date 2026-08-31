@@ -156,10 +156,14 @@ internal class DeviceState
         WriteMemoryUint(0x0D18, 0);
 
         // stream channel max block size 0 (scmbs0)
-        uint width = 4;
-        uint height = 5;
-        int bytesPerPixel = 1; // assuming mono8
-        ulong payloadSize = (ulong)(width * height * (ulong)bytesPerPixel);
+        // read width/height again to computer values
+        ReadRegister(0xA000, out byte[]? w);
+        ReadRegister(0xA004, out byte[]? h);
+        uint width = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(w);
+        uint height = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(h);
+        int bytesPerPixel = 1; // Mono8
+        ulong payloadSize = (ulong)width * height * (ulong)bytesPerPixel;
+
         WriteMemoryUint(0x0D34, (uint)(payloadSize >> 32));
         WriteMemoryUint(0x0D38, (uint)(payloadSize & 0xFFFFFFFF));
 
