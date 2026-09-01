@@ -132,7 +132,7 @@ internal class GVCPServer
                     // register_data
 
                     // we'll do the logic in the write reg method
-                    ack = BuildWriteRegAck(req_id, payload, deviceState, gvspTransmitter);
+                    ack = BuildWriteRegAck(req_id, payload, deviceState, result.RemoteEndPoint);
                     await client.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
                 case GVCPMessages.READMEM_CMD:
@@ -168,7 +168,7 @@ internal class GVCPServer
                         dataToWrite[i] = payload[offset++];
                     }
 
-                    ack = BuildWriteMemAck(req_id, addressToStartWritingTo, dataToWrite, deviceState);
+                    ack = BuildWriteMemAck(req_id, addressToStartWritingTo, dataToWrite, deviceState, gvspTransmitter);
                     await client.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
                 default:
@@ -372,7 +372,7 @@ internal class GVCPServer
         return new Ack(GVCPMessages.READREG_ACK, readRegisterResult, ack);
     }
 
-    private static Ack BuildWriteRegAck(ushort req_id, ReadOnlySpan<byte> payload, DeviceState deviceState, GVSPTransmitter gvspTransmitter)
+    private static Ack BuildWriteRegAck(ushort req_id, ReadOnlySpan<byte> payload, DeviceState deviceState, IPEndPoint sender)
     {
         // header (8 bytes) + 4 bytes per item in payload
         byte[] ack = new byte[8 + 4];
@@ -397,19 +397,17 @@ internal class GVCPServer
             register_data = BinaryPrimitives.ReadUInt32BigEndian(payload.Slice(offsetForReading, 4));
             offsetForReading += 4;
 
-            // now we write the register value to device
-            status = deviceState.WriteRegister(register_address, BitConverter.GetBytes(register_data));
+            byte[] buffer = new byte[4];
+            BinaryPrimitives.WriteUInt32BigEndian(buffer, register_data);
 
-            // if the address matches addresses for Start/Stop acqsuitision
-            if (register_address == 0xA00C)
+            if (register_address == 0x0A00)
             {
-                gvspTransmitter.StartAcquisition(deviceState);
-                deviceState.WriteRegister(register_address, [0]); // signal done
+                status = deviceState.HandleCCPWrite(sender, buffer);
             }
-            else if (register_address == 0xA010)
+            else
             {
-                gvspTransmitter.StopAcquisition();
-                deviceState.WriteRegister(register_address, [0]); // signal done
+                // now we write the register value to device
+                status = deviceState.WriteRegister(register_address, buffer);
             }
 
             if (status != GVCPStatus.GEV_STATUS_SUCCESS)
@@ -499,7 +497,7 @@ internal class GVCPServer
         return new Ack(GVCPMessages.READMEM_ACK, status, ack);
     }
 
-    private static Ack BuildWriteMemAck(ushort req_id, uint address, byte[] data, DeviceState deviceState)
+    private static Ack BuildWriteMemAck(ushort req_id, uint address, byte[] data, DeviceState deviceState, GVSPTransmitter gvspTransmitter)
     {
         // header (8 bytes) + address (4 bytes) + (1 byte per data)
         byte[] ack = new byte[8 + 4];
@@ -509,6 +507,18 @@ internal class GVCPServer
 
         // first we'll actually write the data to device
         ushort status = deviceState.WriteMemory(address, data);
+
+        // if the address matches addresses for Start/Stop acqsuitision
+        if (address == 0xA00C)
+        {
+            gvspTransmitter.StartAcquisition(deviceState);
+            deviceState.WriteRegister(address, new byte[4]); // signal done
+        }
+        else if (address == 0xA010)
+        {
+            gvspTransmitter.StopAcquisition();
+            deviceState.WriteRegister(address, new byte[4]); // signal done
+        }
 
         // reserved (2 bytes)
         // spec says set 0 on transmission, ignore on reception.
