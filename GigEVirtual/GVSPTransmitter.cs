@@ -46,12 +46,12 @@ internal class GVSPTransmitter
         // SCP0 (destination port)
         deviceState.ReadRegister(0x0D00, out byte[]? scp0);
         // host_port is last two bytes
-        int port = BinaryPrimitives.ReadInt16BigEndian(scp0.AsSpan(2, 2));
+        int port = BinaryPrimitives.ReadUInt16BigEndian(scp0.AsSpan(2, 2));
 
         // SCPS0 (packet size)
         deviceState.ReadRegister(0x0D04, out byte[]? scps0);
         // packet_size is last two bytes
-        _packetSize = BinaryPrimitives.ReadInt16BigEndian(scps0.AsSpan(2,2));
+        _packetSize = BinaryPrimitives.ReadUInt16BigEndian(scps0.AsSpan(2,2));
 
         // width
         deviceState.ReadRegister(0xA000, out byte[]? widthOut);
@@ -76,8 +76,14 @@ internal class GVSPTransmitter
         _udpClient = new();
         _udpClient.Connect(endpoint);
 
+        Console.WriteLine($"starting acq to {destinationIP}:{port}");
+
         _cts = new();
-        _ = Stream(_cts.Token);
+        _ = Stream(_cts.Token).ContinueWith(t =>
+        {
+            if (t.Exception is not null)
+                Console.WriteLine(t.Exception.GetBaseException());
+        }, TaskContinuationOptions.OnlyOnFaulted);
     }
 
     public void StopAcquisition()
@@ -242,7 +248,7 @@ internal class GVSPTransmitter
 
     private byte[] BuildDataTrailer()
     {
-        byte[] trailer = new byte[gvspHeaderSize + 4];
+        byte[] trailer = new byte[gvspHeaderSize + 8];
 
         // we'll copy the header at the end
         int offset = gvspHeaderSize;
@@ -257,7 +263,7 @@ internal class GVSPTransmitter
         offset += 2;
 
         // size_y (4 bytes)
-        BinaryPrimitives.WriteUInt32BigEndian(trailer.AsSpan(offset, 4), 0);
+        BinaryPrimitives.WriteUInt32BigEndian(trailer.AsSpan(offset, 4), (uint)_height);
         offset += 4;
 
         // copy header
