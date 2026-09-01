@@ -142,6 +142,7 @@ internal class DeviceState
         WriteMemoryUint(0xA000, 640); // width
         WriteMemoryUint(0xA004, 480); // height
         WriteMemoryUint(0xA008, GVSPPixelFormats.Mono8); // pixelFormat
+        WriteMemoryUint(0xA014, 0); // acquisition mode (0 = continuous)
 
         // gvsp registers
 
