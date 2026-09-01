@@ -5,6 +5,7 @@
 // manufacturer-specific registers, plus helper methods to read from these.
 // --------------------------------------------------------------------------------
 
+using System.Buffers.Binary;
 using System.Net;
 using System.Text;
 
@@ -35,6 +36,8 @@ internal class DeviceState
     // just in case it's accessed at the same time either from GVCP or GVSP
     // implementations.
     private object _registersLock = new();
+
+    private IPEndPoint? _primaryController;
 
     // --------------------------------------------------------------- constructors
 
@@ -296,5 +299,29 @@ internal class DeviceState
     public void SetIP(IPAddress ipLocal)
     {
         WriteMemory(0x0024, ipLocal.GetAddressBytes());
+    }
+
+    public ushort HandleCCPWrite(IPEndPoint sender, byte[] value)
+    {
+        uint requested = BinaryPrimitives.ReadUInt32BigEndian(value);
+
+        if (requested == 0)
+        {
+            // closing control channel
+            if (Equals(_primaryController, sender)) _primaryController = null;
+            WriteMemoryUint(0x0A00, 0);
+            return GVCPStatus.GEV_STATUS_SUCCESS;
+        }
+
+        if (_primaryController == null || Equals(_primaryController, sender))
+        {
+            // same app re-requesting is allowed
+            _primaryController = sender;
+            WriteMemoryUint(0x0A00, requested);
+            return GVCPStatus.GEV_STATUS_SUCCESS;
+        }
+
+        // someone else already has it
+        return GVCPStatus.GEV_STATUS_ACCESS_DENIED;
     }
 }
