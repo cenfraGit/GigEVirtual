@@ -76,7 +76,7 @@ internal class GVSPTransmitter
         _udpClient = new();
         _udpClient.Connect(endpoint);
 
-        Console.WriteLine($"starting acq to {destinationIP}:{port}");
+        Console.WriteLine($"[GVSP] StartAcquisition: dest={destinationIP}:{port}, packetSize={_packetSize}");
 
         _cts = new();
         _ = Stream(_cts.Token).ContinueWith(t =>
