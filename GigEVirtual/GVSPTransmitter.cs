@@ -65,11 +65,14 @@ internal class GVSPTransmitter
         deviceState.ReadRegister(0xA008, out byte[]? pixelFormatOut);
         _pixelFormat = BinaryPrimitives.ReadUInt32BigEndian(pixelFormatOut);
 
-        // create temp image
-        // 1 is bytes per pixel (temp, for mono8)
+        // create temp image (for mono8)
         _testImage = new byte[_width * _height * 1];
-        for (int i = 0; i < _width * _height * 1; i++)
-            _testImage[i] = (i % 2 == 0) ? (byte)255 : (byte)0;
+        for (int i = 0; i < _testImage.Length; i++)
+        {
+            int x = i % _width;
+            int y = i / _width;
+            _testImage[i] = ((x + y) % 2 == 0) ? (byte)255 : (byte)0;
+        }
 
         // udp connection
         IPEndPoint endpoint = new(destinationIP, port);
@@ -134,7 +137,12 @@ internal class GVSPTransmitter
             // increment for next block
             _block_id++;
 
-            await Task.Delay(1000);
+            await Task.Delay(800);
+
+            // flip image
+            Span<byte> span = _testImage;
+            for (int i = 0; i < span.Length; i++)
+                span[i] = (byte)~span[i];
         }
     }
 
