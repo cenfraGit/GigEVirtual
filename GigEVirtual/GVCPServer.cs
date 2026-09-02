@@ -22,7 +22,7 @@ internal class GVCPServer
 
     // --------------------------------------------------------------- constructors
 
-    public static async Task Start(DeviceState deviceState, GVSPTransmitter gvspTransmitter)
+    public static async Task Start(DeviceState deviceState, GVSPTransmitter gvspTransmitter, bool shareToNetwork)
     {
         var _udpClient = new UdpClient(_port);
         if (OperatingSystem.IsWindows())
@@ -31,12 +31,22 @@ internal class GVCPServer
             _udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, [0], null);
         }
 
+        // if shareToNetwork is false, we'll ignore addresses not on this machine
+        var localAddresses = new HashSet<IPAddress> { IPAddress.Loopback };
+        foreach (var ip in Dns.GetHostAddresses(Dns.GetHostName()))
+            if (ip.AddressFamily == AddressFamily.InterNetwork)
+                localAddresses.Add(ip);
+
         PrintConsole($"Listening on UDP {_port}");
 
         while (true)
         {
             var result = await _udpClient.ReceiveAsync();
             byte[] data = result.Buffer;
+
+            // if network sharing is disabled, and endpoint is not local address, ignore
+            if (!shareToNetwork && !localAddresses.Contains(result.RemoteEndPoint.Address))
+                continue;
 
             //PrintConsole($"RAW recv from {result.RemoteEndPoint}: {data.Length} bytes, first byte = 0x{(data.Length > 0 ? data[0] : 0):X2}");
 
