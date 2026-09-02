@@ -75,6 +75,11 @@ internal class GVSPTransmitter
         IPEndPoint endpoint = new(destinationIP, port);
         _udpClient = new();
         _udpClient.Connect(endpoint);
+        if (OperatingSystem.IsWindows())
+        {
+            const int SIO_UDP_CONNRESET = -1744830452;
+            _udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, [0], null);
+        }
 
         Console.WriteLine($"[GVSP] StartAcquisition: dest={destinationIP}:{port}, packetSize={_packetSize}");
 

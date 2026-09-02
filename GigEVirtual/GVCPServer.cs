@@ -24,12 +24,18 @@ internal class GVCPServer
 
     public static async Task Start(DeviceState deviceState, GVSPTransmitter gvspTransmitter)
     {
-        var client = new UdpClient(_port);
+        var _udpClient = new UdpClient(_port);
+        if (OperatingSystem.IsWindows())
+        {
+            const int SIO_UDP_CONNRESET = -1744830452;
+            _udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, [0], null);
+        }
+
         PrintConsole($"Listening on UDP {_port}");
 
         while (true)
         {
-            var result = await client.ReceiveAsync();
+            var result = await _udpClient.ReceiveAsync();
             byte[] data = result.Buffer;
 
             //PrintConsole($"RAW recv from {result.RemoteEndPoint}: {data.Length} bytes, first byte = 0x{(data.Length > 0 ? data[0] : 0):X2}");
@@ -103,7 +109,7 @@ internal class GVCPServer
                         ack = BuildDiscoveryAck(req_id, ipLocal);
                     }
                     // send ack to whoever asked
-                    await client.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
+                    await _udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
                 case GVCPMessages.READREG_CMD:
                     // READREG_CMD payload consists of one or more register addresses.
@@ -123,7 +129,7 @@ internal class GVCPServer
                     Console.WriteLine($"List of addresses to read: {string.Join(", ", addresses.Select(a => $"0x{a:X8}"))}");
 
                     ack = BuildReadRegAck(req_id, addresses, deviceState);
-                    await client.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
+                    await _udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
                 case GVCPMessages.WRITEREG_CMD:
                     // WRITEREG_CMD payload consists of pairs of address + data,
@@ -148,7 +154,7 @@ internal class GVCPServer
 
                     // we'll do the logic in the write reg method
                     ack = BuildWriteRegAck(req_id, payload, deviceState, result.RemoteEndPoint, gvspTransmitter);
-                    await client.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
+                    await _udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
                 case GVCPMessages.READMEM_CMD:
                     // from payload: "address" (4 bytes) is the starting address
@@ -166,7 +172,7 @@ internal class GVCPServer
                     Console.WriteLine($"[READMEM] address is {address:X8}");
 
                     ack = BuildReadMemAck(req_id, address, count, deviceState);
-                    await client.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
+                    await _udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
                 case GVCPMessages.WRITEMEM_CMD:
 
@@ -188,7 +194,7 @@ internal class GVCPServer
                     Console.WriteLine($"[WRITEMEM] addrss to start writing to: {addressToStartWritingTo:X8}");
 
                     ack = BuildWriteMemAck(req_id, addressToStartWritingTo, dataToWrite, deviceState, gvspTransmitter);
-                    await client.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
+                    await _udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
                 default:
                     // must return GEV_STATUS_NOT_IMPLEMENTED via ack?
