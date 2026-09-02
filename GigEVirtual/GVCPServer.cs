@@ -7,6 +7,7 @@
 
 using System.Buffers.Binary;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 
@@ -32,10 +33,7 @@ internal class GVCPServer
         }
 
         // if shareToNetwork is false, we'll ignore addresses not on this machine
-        var localAddresses = new HashSet<IPAddress> { IPAddress.Loopback };
-        foreach (var ip in Dns.GetHostAddresses(Dns.GetHostName()))
-            if (ip.AddressFamily == AddressFamily.InterNetwork)
-                localAddresses.Add(ip);
+        var localAddresses = GetLocalAddresses();
 
         PrintConsole($"Listening on UDP {_port}");
 
@@ -603,5 +601,30 @@ internal class GVCPServer
         //offset += 2;
 
         return new Ack(GVCPMessages.WRITEMEM_ACK, status, ack);
+    }
+
+    // ------------------------------------------------------------ methods
+
+    private static HashSet<IPAddress> GetLocalAddresses()
+    {
+        var localAddresses = new HashSet<IPAddress>();
+
+        foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (nic.OperationalStatus != OperationalStatus.Up) continue;
+            if (nic.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+
+            var properties = nic.GetIPProperties();
+
+            // attempt to look for adapters with default gateway (hopefully wifi adapter),
+            // ignoring virtual adapters like wsl's
+            if (properties.GatewayAddresses.Count == 0) continue;
+
+            foreach (var address in properties.UnicastAddresses)
+                if (address.Address.AddressFamily == AddressFamily.InterNetwork)
+                    localAddresses.Add(address.Address);
+        }
+
+        return localAddresses;
     }
 }
