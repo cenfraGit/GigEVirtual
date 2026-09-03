@@ -26,6 +26,11 @@ internal class GVCPServer
     private GVSPTransmitter _gvspTransmitter;
     bool _shareToNetwork = false;
 
+    // shared discovery
+    private static readonly List<GVCPServer> _instances = [];
+    private static readonly object _instancesLock = new();
+    private static Task? _discoveryTask;
+
     // --------------------------------------------------------------- constructors
 
     public GVCPServer(IPAddress bindAddress, DeviceState deviceState, GVSPTransmitter gvspTransmitter, bool shareToNetwork)
@@ -34,9 +39,74 @@ internal class GVCPServer
         _bindAddress = bindAddress;
         _gvspTransmitter = gvspTransmitter;
         _shareToNetwork = shareToNetwork;
+
+        lock (_instancesLock)
+            _instances.Add(this);
     }
 
-    public async Task Start()
+    public Task Start()
+    {
+        // the first device to run Start() will initialize the discovery
+        // for all instances of devices
+        lock (_instancesLock)
+            if (_discoveryTask is null)
+                _discoveryTask = Task.Run(StartDiscovery);
+        return StartOwnSocket();
+    }
+
+    // this method will continuously run in the background as 0.0.0.0
+    // so that all devices can listen to DISCOVERY_CMD. once a CMD is
+    // found, this method will make all devices reply
+    private static async Task StartDiscovery()
+    {
+        var client = new UdpClient(new IPEndPoint(IPAddress.Any, _port));
+        client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        if (OperatingSystem.IsWindows())
+        {
+            const int SIO_UDP_CONNRESET = -1744830452;
+            client.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, [0], null);
+        }
+
+        Console.WriteLine($"GVCP: shared discovery listener started on 0.0.0.0:{_port}");
+
+        while (true)
+        {
+            var result = await client.ReceiveAsync();
+            byte[] data = result.Buffer;
+
+            if (data.Length < 8)
+                continue;
+
+            if (data[0] != 0x42)
+                continue;
+
+            // capture the rest of the header values:
+            byte flag = data[1];
+            ushort command = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(2, 2));
+            ushort length = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(4, 2));
+            ushort req_id = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(6, 2));
+
+            if (command != GVCPMessages.DISCOVERY_CMD)
+                continue;
+
+            List<GVCPServer> snapshot;
+            lock (_instancesLock)
+                snapshot = [.. _instances];
+
+            foreach (var server in snapshot)
+            {
+                if (server._udpClient is null)
+                    continue;
+
+                server._deviceState.SetIP(server._bindAddress);
+                var ack = server.BuildDiscoveryAck(req_id, server._bindAddress);
+                await server._udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
+                PrintConsole($"[{server._bindAddress}] SENT DISCOVERY_ACK to {result.RemoteEndPoint}");
+            }
+        }
+    }
+
+    private async Task StartOwnSocket()
     {
         _udpClient = new UdpClient(new IPEndPoint(_bindAddress, _port));
         if (OperatingSystem.IsWindows())
@@ -119,19 +189,6 @@ internal class GVCPServer
 
             switch (command)
             {
-                case GVCPMessages.DISCOVERY_CMD:
-
-                    // resolve routing for the ack reply
-                    using (var probeSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
-                    {
-                        probeSocket.Connect(result.RemoteEndPoint.Address, 3956);
-                        IPAddress ipLocal = ((IPEndPoint)probeSocket.LocalEndPoint!).Address;
-                        deviceState.SetIP(ipLocal);
-                        ack = BuildDiscoveryAck(req_id, ipLocal);
-                    }
-                    // send ack to whoever asked
-                    await _udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
-                    break;
                 case GVCPMessages.READREG_CMD:
                     // READREG_CMD payload consists of one or more register addresses.
                     // we'll use the length in the header (which is payload length)
