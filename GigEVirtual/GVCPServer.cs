@@ -248,12 +248,13 @@ internal class GVCPServer
 
         // device_MAC_address (high) (2 bytes)
         // device_MAC_address (low) (4 bytes)
-        byte[] mac = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05 };
-        Array.Copy(sourceArray: mac,
-                   sourceIndex: 0,
-                   destinationArray: ack,
-                   destinationIndex: offset,
-                   length: 6);
+        _deviceState.ReadRegister(0x0008, out byte[]? macHigh);
+        _deviceState.ReadRegister(0x000C, out byte[]? macLow);
+        byte[] mac = new byte[6];
+        mac[0] = macHigh![2];
+        mac[1] = macHigh[3];
+        Array.Copy(macLow!, 0, mac, 2, 4);
+        Array.Copy(mac, 0, ack, offset, 6);
         offset += 6;
 
         // IP_config_options (4 bytes)
@@ -292,33 +293,33 @@ internal class GVCPServer
         offset += 4;
 
         // manufacturer_name (32 bytes)
-        byte[] manufacturer_name = Encoding.ASCII.GetBytes("VIRTUAL");
-        Array.Copy(manufacturer_name, 0, ack, offset, manufacturer_name.Length);
+        _deviceState.ReadMemory(0x0048, 32, out byte[]? manufacturer_name);
+        Array.Copy(manufacturer_name!, 0, ack, offset, manufacturer_name!.Length);
         offset += 32;
 
         // model_name (32 bytes)
-        byte[] model_name = Encoding.ASCII.GetBytes("MODEL");
-        Array.Copy(model_name, 0, ack, offset, model_name.Length);
+        _deviceState.ReadMemory(0x0068, 32, out byte[]? model_name);
+        Array.Copy(model_name!, 0, ack, offset, model_name!.Length);
         offset += 32;
 
         // device_version (32 bytes)
-        byte[] device_version = Encoding.ASCII.GetBytes("1.0");
-        Array.Copy(device_version, 0, ack, offset, device_version.Length);
+        _deviceState.ReadMemory(0x0088, 32, out byte[]? device_version);
+        Array.Copy(device_version!, 0, ack, offset, device_version!.Length);
         offset += 32;
 
         // manufacturer_specific_information (48 bytes)
-        byte[] manufacturer_specific_information = Encoding.ASCII.GetBytes("C# GigEVision Cam");
-        Array.Copy(manufacturer_specific_information, 0, ack, offset, manufacturer_specific_information.Length);
+        _deviceState.ReadMemory(0x00A8, 48, out byte[]? manufacturer_specific_information);
+        Array.Copy(manufacturer_specific_information!, 0, ack, offset, manufacturer_specific_information!.Length);
         offset += 48;
 
         // serial_number (16 bytes)
-        byte[] serial_number = Encoding.ASCII.GetBytes("S0001");
-        Array.Copy(serial_number, 0, ack, offset, serial_number.Length);
+        _deviceState.ReadMemory(0x00D8, 16, out byte[]? serial_number);
+        Array.Copy(serial_number!, 0, ack, offset, serial_number!.Length);
         offset += 16;
 
         // user_defined_name (16 bytes)
-        byte[] user_defined_name = Encoding.ASCII.GetBytes("virtualDev");
-        Array.Copy(user_defined_name, 0, ack, offset, user_defined_name.Length);
+        _deviceState.ReadMemory(0x00E8, 16, out byte[]? user_defined_name);
+        Array.Copy(user_defined_name!, 0, ack, offset, user_defined_name!.Length);
         //offset += 16;
 
         // ------------------------------------------ header (8 bytes)
