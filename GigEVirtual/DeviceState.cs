@@ -54,11 +54,16 @@ internal class DeviceState
             Pack(value: 2, specBitStart: 24, width: 8); // character_set_index
         WriteMemoryUint(0x0004, deviceMode);
 
-        // device mac address (high)
-        WriteMemoryUint(0x0008, 0x0000AABB);
+        // generate random mac (temp)
+        var rnd = new Random();
+        byte[] mac = new byte[6];
+        rnd.NextBytes(mac);
+        mac[0] = (byte)(mac[0] & 0xFE);
 
+        // device mac address (high)
+        WriteMemoryUint(0x0008, (uint)((mac[0] << 8) | mac[1]));
         // device mac address (low)
-        WriteMemoryUint(0x000C, 0xCCDDEEFF);
+        WriteMemoryUint(0x000C, (uint)((mac[2] << 24) | (mac[3] << 16) | (mac[4] << 8) | mac[5]));
 
         // network interface capability
         uint networkInterfaceCapability =
