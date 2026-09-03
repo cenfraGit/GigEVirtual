@@ -16,6 +16,8 @@ internal class GVSPTransmitter
 
     private CancellationTokenSource? _cts = null;
 
+    private DeviceState _deviceState;
+    private IPAddress _bindAddress;
     private UdpClient? _udpClient;
     private int _packetSize;
     private int _width;
@@ -29,10 +31,17 @@ internal class GVSPTransmitter
 
     private byte[] _testImage;
 
+    // --------------------------------------------------------------- constructors
+
+    public GVSPTransmitter(DeviceState deviceState, IPAddress bindAddress)
+    {
+        _deviceState = deviceState;
+        _bindAddress = bindAddress;
+    }
 
     // --------------------------------------------------------------- methods
 
-    public void StartAcquisition(DeviceState deviceState)
+    public void StartAcquisition()
     {
         // if already streaming, return
         if (_cts != null) return;
@@ -40,29 +49,29 @@ internal class GVSPTransmitter
         // read necessary registers. these should already be set in the device
 
         // SCDA0 (destination IP)
-        deviceState.ReadRegister(0x0D18, out byte[]? scda0);
+        _deviceState.ReadRegister(0x0D18, out byte[]? scda0);
         IPAddress destinationIP = new IPAddress(scda0!);
 
         // SCP0 (destination port)
-        deviceState.ReadRegister(0x0D00, out byte[]? scp0);
+        _deviceState.ReadRegister(0x0D00, out byte[]? scp0);
         // host_port is last two bytes
         int port = BinaryPrimitives.ReadUInt16BigEndian(scp0.AsSpan(2, 2));
 
         // SCPS0 (packet size)
-        deviceState.ReadRegister(0x0D04, out byte[]? scps0);
+        _deviceState.ReadRegister(0x0D04, out byte[]? scps0);
         // packet_size is last two bytes
         _packetSize = BinaryPrimitives.ReadUInt16BigEndian(scps0.AsSpan(2,2));
 
         // width
-        deviceState.ReadRegister(0xA000, out byte[]? widthOut);
+        _deviceState.ReadRegister(0xA000, out byte[]? widthOut);
         _width = BinaryPrimitives.ReadInt32BigEndian(widthOut);
 
         // height
-        deviceState.ReadRegister(0xA004, out byte[]? heightOut);
+        _deviceState.ReadRegister(0xA004, out byte[]? heightOut);
         _height = BinaryPrimitives.ReadInt32BigEndian(heightOut);
 
         // pixel format
-        deviceState.ReadRegister(0xA008, out byte[]? pixelFormatOut);
+        _deviceState.ReadRegister(0xA008, out byte[]? pixelFormatOut);
         _pixelFormat = BinaryPrimitives.ReadUInt32BigEndian(pixelFormatOut);
 
         // create temp image (for mono8)
@@ -75,8 +84,8 @@ internal class GVSPTransmitter
         }
 
         // udp connection
+        _udpClient = new(new IPEndPoint(_bindAddress, 0));
         IPEndPoint endpoint = new(destinationIP, port);
-        _udpClient = new();
         _udpClient.Connect(endpoint);
         if (OperatingSystem.IsWindows())
         {
