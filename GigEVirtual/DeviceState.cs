@@ -41,7 +41,12 @@ internal class DeviceState
 
     // --------------------------------------------------------------- constructors
 
-    public DeviceState()
+    public DeviceState(string manufacturerName = "cenfra",
+                       string modelName = "modelVirtual",
+                       string deviceVersion = "1.0",
+                       string manufacturerInfo = "C# cam",
+                       string serialNumber = "S0001",
+                       string deviceName = "virtualDev")
     {
         // version
         WriteMemoryUint(0x0000, 0x00020002); // version 2.2
@@ -94,22 +99,22 @@ internal class DeviceState
         WriteMemory(0x0044, default_gateway);
 
         // manufacturer name
-        WriteMemoryString(0x0048, "VIRTUAL", 32);
+        WriteMemoryString(0x0048, manufacturerName, 32); // "VIRTUAL"
 
         // model name
-        WriteMemoryString(0x0068, "MODEL", 32);
+        WriteMemoryString(0x0068, modelName, 32); // "MODEL"
 
         // device version
-        WriteMemoryString(0x0088, "1.0", 32);
+        WriteMemoryString(0x0088, deviceVersion, 32); // "1.0"
 
         // manufacturer info
-        WriteMemoryString(0x00A8, "C# GigEVision Cam", 48);
+        WriteMemoryString(0x00A8, manufacturerInfo, 48); // "C# GigEVision Cam"
 
         // serial number register
-        WriteMemoryString(0x00D8, "S0001", 16);
+        WriteMemoryString(0x00D8, serialNumber, 16); // "S0001"
 
         // user-defined name
-        WriteMemoryString(0x00E8, "virtualDev", 16);
+        WriteMemoryString(0x00E8, deviceName, 16); // "virtualDev"
 
         // number of network interfaces
         WriteMemoryUint(0x0600, 1);
