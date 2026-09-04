@@ -69,6 +69,9 @@ internal class GVCPServer
 
         Console.WriteLine($"GVCP: shared discovery listener started on 0.0.0.0:{_port}");
 
+        // will be used if "shareToNetwork" is disabled
+        var localAddresses = GetLocalAddresses();
+
         while (true)
         {
             var result = await client.ReceiveAsync();
@@ -96,6 +99,10 @@ internal class GVCPServer
             foreach (var server in snapshot)
             {
                 if (server._udpClient is null)
+                    continue;
+
+                // if network sharing is disabled, and endpoint is not local address, ignore
+                if (!server._shareToNetwork && !localAddresses.Contains(result.RemoteEndPoint.Address))
                     continue;
 
                 server._deviceState.SetIP(server._bindAddress);
