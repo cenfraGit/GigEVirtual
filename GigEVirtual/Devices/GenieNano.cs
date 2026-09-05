@@ -136,6 +136,24 @@ public class GenieNano : GigEDevice
     private const int ChunkUserName = 104;
     private const int ChunkPixelFormat = 120;
 
+    // the last few the description places behind a formula rather than a plain
+    // address, so the generator cannot reach them. a real nano answers all of
+    // them, and an application asks: the timer feature, the digital gain, the
+    // output line source, and how much memory is set aside for packet resend.
+    // the timer block, one register per feature at a fixed offset from the base.
+    // the selector adds to these, and with a single timer it adds nothing.
+    private const uint TimerMode = 0x20000A60;
+    private const uint TimerTriggerSource = 0x20000A70;
+    private const uint TimerTriggerActivation = 0x20000A80;
+    private const uint TimerStatus = 0x20000AA0;
+    private const uint TimerDuration = 0x20000AB0;
+    private const uint TimerReset = 0x20000AC0;
+    private const uint TimerValue = 0x20000AD0;
+    private const uint DigitalGain = 0x200015D0;
+    private const uint OutputLineSource = 0x20005BF0;
+    private const uint ResendBufferSize = 0x12000070;
+    private const uint ResendBufferMax = 0x12000078;
+
     // the chunk carries the camera's own identity, which lives in the bootstrap
     // registers at the addresses the spec fixes for them
     private const uint SerialNumberAddress = 0x00D8;
@@ -171,6 +189,12 @@ public class GenieNano : GigEDevice
     private const uint MaxGain = 800;             // 200 * log10(10000)
     private const uint MaxTriggerDelay = 2_000_000; // 2 s, the range the description gives
     private const uint MaxFrameCount = 65535;
+
+    // the resend buffer, in bytes. a frame at full size is the unit that
+    // actually matters, since resend keeps whole blocks.
+    private const uint FullFrame = SensorWidth * SensorHeight;
+    private const uint DefaultResendBytes = 2 * FullFrame;
+    private const uint MaxResendBytes = 8 * FullFrame;
 
     // --------------------------------------------------------------- construction
 
@@ -379,6 +403,24 @@ public class GenieNano : GigEDevice
             SetGeometry(state, chunk: Read(v) != 0)).LockedWhileStreaming = true;
 
         DefineReadOnly(state, ChunkCapability, 1);
+
+        Define(state, TimerMode, 0);
+        Define(state, TimerTriggerSource, 0);
+        Define(state, TimerTriggerActivation, 0);
+        Define(state, TimerDuration, 0);
+        Define(state, TimerReset, 0, selfClearing: true);
+        DefineReadOnly(state, TimerStatus, 0);
+        DefineReadOnly(state, TimerValue, 0);
+        Define(state, DigitalGain, 0);
+        Define(state, OutputLineSource, 0);
+
+        // how much memory the camera sets aside to resend from, in bytes. two
+        // full frames is what we actually hold, and the register is the only
+        // way an application can find that out or ask for more.
+        Define(state, ResendBufferSize, DefaultResendBytes, (_, v) =>
+            InRange(Read(v), 0, MaxResendBytes)).LockedWhileStreaming = true;
+
+        DefineReadOnly(state, ResendBufferMax, MaxResendBytes);
         DefineReadOnly(state, PixelFormatCaps, MonoFormats);
         DefineReadOnly(state, FrameRateMin, MinFrameRate);
         DefineReadOnly(state, FrameRateMax, MaxFrameRate);
@@ -472,7 +514,17 @@ public class GenieNano : GigEDevice
             BlockLimit = () => BlockLimit(state),
             Report = (phase, blockId) => Report(state, phase, blockId),
             Chunks = () => Chunks(state),
+            ResendBlocks = () => ResendBlocks(state),
         };
+    }
+
+    // how many whole blocks fit in the memory set aside for resend. a bigger
+    // frame means fewer of them, which is exactly the trade a real camera makes.
+    internal static int ResendBlocks(DeviceState state)
+    {
+        uint frame = Math.Max(1, state.ReadUint(Width) * state.ReadUint(Height));
+
+        return (int)Math.Max(1, state.ReadUint(ResendBufferSize) / frame);
     }
 
     // --------------------------------------------------------------- chunk data

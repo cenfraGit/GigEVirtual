@@ -41,8 +41,9 @@ public class DeviceStateTests
     {
         var state = TestDevice.Bare();
 
-        // nothing is mapped at the gvcp configuration register
-        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_ADDRESS, state.ReadRegister(0x0954, out _));
+        // the control switchover key. an optional register, and we do not claim
+        // the switchover capability that would make it mean anything.
+        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_ADDRESS, state.ReadRegister(0x095C, out _));
     }
 
     [Fact]
@@ -50,7 +51,7 @@ public class DeviceStateTests
     {
         DeviceState state = Controlled();
 
-        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_ADDRESS, state.WriteRegister(Controller, 0x0954, U32(1)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_ADDRESS, state.WriteRegister(Controller, 0x095C, U32(1)));
     }
 
     [Fact]
@@ -773,5 +774,168 @@ public class DeviceStateTests
 
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(0x0930, out byte[]? message));
         Assert.NotEqual(0u, ReadU32(message!) & 0x80000000); // MCSP, bit 0
+    }
+
+    // --------------------------------------------------------------- conformance
+
+    // every one of these is a register the spec says a device MUST implement,
+    // and every one of them was asked for by a real application
+    [Theory]
+    [InlineData(0x0910u)] // number of active links
+    [InlineData(0x0958u)] // pending timeout
+    [InlineData(0x0964u)] // physical link configuration capability
+    [InlineData(0x0968u)] // physical link configuration
+    [InlineData(0x0D20u)] // stream channel capability 0
+    [InlineData(0x0D24u)] // stream channel configuration 0
+    public void MandatoryRegistersExist(uint address)
+    {
+        DeviceState state = TestDevice.Bare();
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(address, out _));
+    }
+
+    // a capability bit is a promise. SCEBAx says extended bootstrap registers
+    // live at the address in SCEBA0, and ours is 0, so the bit stays clear.
+    [Fact]
+    public void WeDoNotClaimCapabilitiesWeDoNotHave()
+    {
+        DeviceState state = TestDevice.Bare();
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(0x092C, out byte[]? gvsp));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(0x0D3C, out byte[]? sceba0));
+
+        bool claimed = (ReadU32(gvsp!) & 0x10000000) != 0; // SCEBAx, bit 3
+
+        Assert.Equal(0u, ReadU32(sceba0!));
+        Assert.False(claimed, "SCEBAx is advertised but SCEBA0 points nowhere");
+    }
+
+    // the resend path answers with the status codes introduced in 1.1, so the
+    // capability that says we can generate them has to be set
+    [Fact]
+    public void TheExtendedStatusCodesWeEmitAreAdvertised()
+    {
+        DeviceState state = TestDevice.Bare();
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(0x0934, out byte[]? capability));
+
+        Assert.NotEqual(0u, ReadU32(capability!) & 0x00400000); // bit 9
+        Assert.NotEqual(0u, ReadU32(capability!) & 0x20000000); // bit 2, heartbeat_disable
+    }
+
+    // an application turns this on while it sits in a debugger, so it does not
+    // lose the device to a heartbeat it is too busy to send
+    [Fact]
+    public void DisablingTheHeartbeatStopsTheTimer()
+    {
+        DeviceState state = Controlled();
+
+        // bit 31 in spec numbering, so the low bit
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0954, U32(1)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0938, U32(500)));
+
+        state.ResetHeartbeat(Controller);
+        Thread.Sleep(900);
+
+        // with the heartbeat running this would have closed by now
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x00E8, new byte[16]));
+    }
+
+    // spec: the configuration register goes back to its factory default when the
+    // control channel closes, so the next application does not inherit it
+    [Fact]
+    public void ReleasingControlResetsTheConfiguration()
+    {
+        DeviceState state = Controlled();
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0954, U32(1)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(0)));
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(0x0954, out byte[]? config));
+        Assert.Equal(0u, ReadU32(config!));
+    }
+
+    // the stream channel configuration describes a transfer in progress, so the
+    // spec has it answer BUSY rather than change underneath one
+    [Fact]
+    public void TheStreamChannelConfigurationLocksDuringATransfer()
+    {
+        DeviceState state = Controlled();
+        bool streaming = false;
+
+        state.StreamingCheck(() => streaming);
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0D24, U32(0)));
+
+        streaming = true;
+        Assert.Equal(GVCPStatus.GEV_STATUS_BUSY, state.WriteRegister(Controller, 0x0D24, U32(0)));
+    }
+
+    // --------------------------------------------------------------- forceip
+
+    private static byte[] ForceIpPayload(byte[] mac, string staticIp, string mask, string gateway)
+    {
+        byte[] payload = new byte[56];
+
+        mac.CopyTo(payload, 2);
+        IPAddress.Parse(staticIp).GetAddressBytes().CopyTo(payload, 20);
+        IPAddress.Parse(mask).GetAddressBytes().CopyTo(payload, 36);
+        IPAddress.Parse(gateway).GetAddressBytes().CopyTo(payload, 52);
+
+        return payload;
+    }
+
+    [Fact]
+    public void ForceIpCarriesTheMacAndThreeAddresses()
+    {
+        byte[] mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+
+        var forced = GVCPServer.ParseForceIp(
+            ForceIpPayload(mac, "192.168.1.50", "255.255.255.0", "192.168.1.1"));
+
+        Assert.Equal(mac, forced!.Value.Mac);
+        Assert.Equal(IPAddress.Parse("192.168.1.50"), forced.Value.StaticIp);
+        Assert.Equal(IPAddress.Parse("255.255.255.0"), forced.Value.SubnetMask);
+        Assert.Equal(IPAddress.Parse("192.168.1.1"), forced.Value.Gateway);
+    }
+
+    [Fact]
+    public void ATruncatedForceIpIsNotOne()
+    {
+        Assert.Null(GVCPServer.ParseForceIp(new byte[55]));
+    }
+
+    // the command is broadcast, so every device on the wire sees every one of
+    // them and has to work out from the mac whether it was the one meant
+    [Fact]
+    public void TheMacIsHowADeviceKnowsItWasMeant()
+    {
+        DeviceState state = TestDevice.Bare();
+        byte[] mine = state.Mac();
+
+        Assert.Equal(6, mine.Length);
+
+        // locally administered and unicast, which is what a made-up mac has to be
+        Assert.Equal(0x02, mine[0] & 0x03);
+
+        byte[] theirs = [.. mine];
+        theirs[5] ^= 0xFF;
+
+        Assert.NotEqual(mine, theirs);
+    }
+
+    // the whole point of forceip is recovering a device nobody is talking to, so
+    // it stays out of the way of one that is
+    [Fact]
+    public void ADeviceUnderControlReportsThatItIsTaken()
+    {
+        DeviceState state = TestDevice.Bare();
+        Assert.False(state.HasController);
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(2)));
+        Assert.True(state.HasController);
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(0)));
+        Assert.False(state.HasController);
     }
 }

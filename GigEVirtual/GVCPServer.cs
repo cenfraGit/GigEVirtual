@@ -93,7 +93,7 @@ internal class GVCPServer
             ushort length = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(4, 2));
             ushort req_id = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(6, 2));
 
-            if (command != GVCPMessages.DISCOVERY_CMD)
+            if (command is not (GVCPMessages.DISCOVERY_CMD or GVCPMessages.FORCEIP_CMD))
                 continue;
 
             List<GVCPServer> snapshot;
@@ -108,6 +108,12 @@ internal class GVCPServer
                 // if network sharing is disabled, and endpoint is not local address, ignore
                 if (!server._shareToNetwork && !localAddresses.Contains(result.RemoteEndPoint.Address))
                     continue;
+
+                if (command == GVCPMessages.FORCEIP_CMD)
+                {
+                    await server.ForceIp(flag, req_id, data.AsSpan(8).ToArray(), result.RemoteEndPoint);
+                    continue;
+                }
 
                 server._deviceState.SetIP(server._bindAddress);
                 var ack = server.BuildDiscoveryAck(req_id, server._bindAddress);
@@ -211,6 +217,15 @@ internal class GVCPServer
             // NOT_IMPLEMENTED this loop gives anything it does not handle.
             if (command == GVCPMessages.DISCOVERY_CMD)
                 continue;
+
+            // the same listener receives broadcast FORCEIP, so only a unicast
+            // one reaches this socket. either way it never touches the
+            // heartbeat and never replays an earlier acknowledge.
+            if (command == GVCPMessages.FORCEIP_CMD)
+            {
+                await ForceIp(flag, req_id, payload.ToArray(), result.RemoteEndPoint);
+                continue;
+            }
 
             PrintConsole($"CMD from {result.RemoteEndPoint,-21}: " +
                 $"{GVCPMessages.GetName(command)} (0x{command:X4}) " +
@@ -398,6 +413,81 @@ internal class GVCPServer
         if (last == 0x00FFFFFF) last = uint.MaxValue;
 
         return (channel, blockId, first, last);
+    }
+
+    // FORCEIP names its target by mac address rather than by ip, which is what
+    // makes it the way to reach a device whose address is wrong or unknown. it
+    // is broadcast, so every device on the wire sees every one of them and has
+    // to decide for itself whether it was meant. null means too short to be one.
+    internal static (byte[] Mac, IPAddress StaticIp, IPAddress SubnetMask, IPAddress Gateway)?
+        ParseForceIp(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length < 56) return null;
+
+        // the mac sits in the low 6 bytes of the first 8, and each address that
+        // follows is the low 4 bytes of a 16 byte slot
+        return (payload.Slice(2, 6).ToArray(),
+                new IPAddress(payload.Slice(20, 4).ToArray()),
+                new IPAddress(payload.Slice(36, 4).ToArray()),
+                new IPAddress(payload.Slice(52, 4).ToArray()));
+    }
+
+    private async Task ForceIp(byte flag, ushort reqId, byte[] payload, IPEndPoint from)
+    {
+        if (ParseForceIp(payload) is not { } forced)
+        {
+            PrintConsole($"FORCEIP_CMD is too short ({payload.Length} bytes), ignoring");
+            return;
+        }
+
+        // spec: a device the command does not name discards it without a word,
+        // and so does one that an application is already in control of. both
+        // silences are the point: this command exists to rescue a device nobody
+        // can talk to, not to steal one that is working.
+        if (!forced.Mac.SequenceEqual(_deviceState.Mac())) return;
+
+        if (_deviceState.HasController)
+        {
+            PrintConsole("FORCEIP ignored: an application holds the control channel");
+            return;
+        }
+
+        // with no control channel there is no stream or message channel either,
+        // so the spec's "close everything first" has nothing left to close: both
+        // are opened through registers only the primary application may write.
+
+        if (forced.StaticIp.Equals(IPAddress.Any))
+        {
+            // spec: restart the ip configuration cycle and stay quiet. ours is
+            // static by construction, so it restarts onto the same address.
+            PrintConsole($"FORCEIP: ip configuration restarted, still {_bindAddress}");
+            return;
+        }
+
+        // an emulated device lives on an address the machine already has, so it
+        // can only accept the one it is already answering on. anything else it
+        // simply cannot become, and the spec has it acknowledge only once the
+        // address is actually in use, so this stays silent rather than lying.
+        if (!forced.StaticIp.Equals(_bindAddress))
+        {
+            PrintConsole($"FORCEIP to {forced.StaticIp} refused: this device answers on " +
+                $"{_bindAddress} and cannot move. configure that address on the adapter instead.");
+            return;
+        }
+
+        _deviceState.SetSubnetAndGateway(forced.SubnetMask, forced.Gateway);
+
+        PrintConsole($"FORCEIP: {forced.StaticIp} mask {forced.SubnetMask} " +
+            $"gateway {forced.Gateway}");
+
+        // bit 7 of the flag byte in spec numbering, the same acknowledge bit
+        // every other command uses
+        if ((flag & 0x01) == 0 || _udpClient is null) return;
+
+        Ack ack = BuildErrorAck(reqId, GVCPMessages.FORCEIP_ACK, GVCPStatus.GEV_STATUS_SUCCESS);
+        await _udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, from);
+
+        PrintConsole($"SENT FORCEIP_ACK to {from}");
     }
 
     // --------------------------------------------------------------- ack builder methods

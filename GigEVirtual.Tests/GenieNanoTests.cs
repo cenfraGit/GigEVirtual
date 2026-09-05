@@ -69,6 +69,7 @@ public class GenieNanoTests : IDisposable
 
     private const uint ChunkModeActive = 0x20001B80;
     private const uint ChunkCapability = 0x20001BB0;
+    private const uint ResendBufferSize = 0x12000070;
 
     private readonly string _dir;
     private readonly string _xmlPath;
@@ -892,5 +893,63 @@ public class GenieNanoTests : IDisposable
 
         transmitter.StopAcquisition();
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ChunkModeActive, 1));
+    }
+
+    // --------------------------------------------------------------- the resend buffer
+
+    // a real application asks all of these, and the description puts every one
+    // behind a formula the generator cannot follow, so they are declared by hand
+    [Theory]
+    [InlineData(0x20000A60u)] // timer mode
+    [InlineData(0x20000A70u)] // timer trigger source
+    [InlineData(0x20000A80u)] // timer trigger activation
+    [InlineData(0x20000AA0u)] // timer status
+    [InlineData(0x20000AB0u)] // timer duration
+    [InlineData(0x20000AC0u)] // timer reset
+    [InlineData(0x20000AD0u)] // timer value
+    [InlineData(0x200015D0u)] // digital gain
+    [InlineData(0x20005BF0u)] // output line source
+    [InlineData(0x12000070u)] // packet resend buffer size
+    public void TheRegistersBehindAFormulaAreDeclaredAnyway(uint address)
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, _state.ReadRegister(address, out _));
+    }
+
+    // resend keeps whole blocks, so the same memory holds fewer of a bigger frame
+    [Fact]
+    public void TheResendBufferHoldsFewerBlocksAsTheFrameGrows()
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(Width, 1920));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(Height, 1200));
+
+        // the default is two full frames
+        Assert.Equal(2, GenieNano.ResendBlocks(_state));
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(Width, 960));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(Height, 600));
+
+        // a quarter of the frame, so four times as many of them
+        Assert.Equal(8, GenieNano.ResendBlocks(_state));
+    }
+
+    [Fact]
+    public void AskingForMoreResendMemoryKeepsMoreBlocks()
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(Width, 1920));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(Height, 1200));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ResendBufferSize, 6 * 1920 * 1200));
+
+        Assert.Equal(6, GenieNano.ResendBlocks(_state));
+
+        // and never fewer than the block being sent right now
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ResendBufferSize, 0));
+        Assert.Equal(1, GenieNano.ResendBlocks(_state));
+    }
+
+    [Fact]
+    public void MoreResendMemoryThanTheCameraHasIsRefused()
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_PARAMETER,
+            Write(ResendBufferSize, 9 * 1920 * 1200));
     }
 }

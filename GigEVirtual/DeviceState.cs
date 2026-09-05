@@ -224,6 +224,9 @@ internal class DeviceState
         // number of message channels. a device may have one or none
         DefineUint(0x0900, RegAccess.ReadOnly, 1);
 
+        // number of active links. we are one interface on one link
+        DefineUint(0x0910, RegAccess.ReadOnly, 1);
+
         // number of stream channels
         DefineUint(0x0904, RegAccess.ReadOnly, 1);
 
@@ -235,15 +238,20 @@ internal class DeviceState
         uint gvspCapability =
             Pack(1, specBitStart: 0, width: 1) | // SCSPx is supported
             Pack(0, specBitStart: 1, width: 1) | // legacy_16bit_block_id_supported
-            Pack(1, specBitStart: 2, width: 1) | // SCMBSx_supported
-            Pack(1, specBitStart: 3, width: 1);  // SCEBAx_supported
+            Pack(1, specBitStart: 2, width: 1);  // SCMBSx_supported
+
+        // SCEBAx is deliberately not claimed here. we define SCEBA0 as 0, which
+        // means there is no extended bootstrap block to point at, and a
+        // capability bit an application cannot trust is worse than a missing one.
         DefineUint(0x092C, RegAccess.ReadOnly, gvspCapability);
 
         // gvcp capability
         uint gvcpCapability =
             Pack(1, specBitStart: 0, width: 1) |  // user_defined_name supported
             Pack(1, specBitStart: 1, width: 1) |  // serial_number supported
+            Pack(1, specBitStart: 2, width: 1) |  // heartbeat can be disabled
             Pack(1, specBitStart: 6, width: 1) |  // test packets carry LFSR data
+            Pack(1, specBitStart: 9, width: 1) |  // the 1.1 status codes, which resend uses
             Pack(1, specBitStart: 28, width: 1) | // EVENT supported
             Pack(1, specBitStart: 29, width: 1) | // PACKETRESEND supported
             Pack(1, specBitStart: 30, width: 1) | // WRITEMEM supported
@@ -283,6 +291,21 @@ internal class DeviceState
         // 32-bit reads add up to one coherent 64-bit value
         DefineUint(0x0948, RegAccess.ReadOnly, 0);
         DefineUint(0x094C, RegAccess.ReadOnly, 0);
+
+        // gvcp configuration. only the bits whose capability we claim mean
+        // anything here, and the spec puts it back to its factory default when
+        // the control channel closes.
+        DefineUint(0x0954, RegAccess.ReadWrite, 0);
+
+        // pending timeout, in milliseconds: how long an application should wait
+        // for an acknowledge before giving up. nothing we do takes measurable
+        // time, so this is slack for the machine rather than for the device.
+        DefineUint(0x0958, RegAccess.ReadOnly, 500);
+
+        // physical link configuration capability, then which one is in use. one
+        // interface on one link, with no aggregation, so single link both times.
+        DefineUint(0x0964, RegAccess.ReadOnly, Pack(1, specBitStart: 31, width: 1));
+        DefineUint(0x0968, RegAccess.ReadWrite, Pack(1, specBitStart: 31, width: 1));
 
         // control channel privilege. writable without control, (how
         // control gets claimed in the first place)
@@ -372,6 +395,24 @@ internal class DeviceState
 
         // stream channel destination address 0 (scda0)
         DefineUint(0x0D18, RegAccess.ReadWrite, 0).LockedWhileStreaming = true;
+
+        // stream channel source port 0 (scsp0). filled in while a transfer is
+        // running, the same as MCSP, so an application can let our stream back
+        // in through its own firewall
+        DefineUint(0x0D1C, RegAccess.ReadOnly, 0);
+
+        // stream channel capability 0 (scc0). we serve SCMPC0, and nothing else
+        // on this list: no gendc, no multi-part, no zones, no all-in
+        // transmission, no alternate resend destination, and leaders and
+        // trailers that stay inside the 576 bytes a 2.0 receiver expects.
+        // the extended chunk data bit is a different feature from the extended
+        // chunk mode we do support: it means the deprecated payload type.
+        DefineUint(0x0D20, RegAccess.ReadOnly, Pack(1, specBitStart: 23, width: 1));
+
+        // stream channel configuration 0 (sccfg0). every bit it can carry is a
+        // capability we do not claim above, so it stays 0, and the spec has it
+        // refuse writes during a transfer either way.
+        DefineUint(0x0D24, RegAccess.ReadWrite, 0).LockedWhileStreaming = true;
 
         // stream channel max packet count 0 (scmpc0)
         DefineUint(0x0D30, RegAccess.ReadOnly, 0);
@@ -830,6 +871,16 @@ internal class DeviceState
         lock (_registersLock)
         {
             if (!Equals(_primaryController, sender)) return;
+
+            // heartbeat_disable is bit 31 of the gvcp configuration register in
+            // spec numbering, so its low bit. an application turns it off while
+            // it is sitting in a debugger and would otherwise lose the device.
+            if ((PeekUint(0x0954) & 0x1) != 0)
+            {
+                _heartbeatTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+                return;
+            }
+
             _heartbeatTimer?.Change((int)PeekUint(0x0938), Timeout.Infinite);
         }
     }
@@ -850,6 +901,7 @@ internal class DeviceState
             // available for another application, and its registers have to
             // represent that new state
             PokeUint(0x0A00, 0); // CCP
+            PokeUint(0x0954, 0); // GVCP configuration, back to its factory default
             PokeUint(0x0B00, 0); // MCP, the message channel port
             PokeUint(0x0D00, 0); // SCP0, the stream channel port
 
@@ -871,6 +923,30 @@ internal class DeviceState
     // primary or not, and it never acknowledges one on the control channel.
     public void PacketResend(ushort streamChannel, ulong blockId, uint firstPacketId, uint lastPacketId) =>
         _packetResend?.Invoke(streamChannel, blockId, firstPacketId, lastPacketId);
+
+    // FORCEIP names the device it means by mac address, and only acts when
+    // nobody holds the control channel, which is what makes it a way to recover
+    // a device whose address you have lost
+    public byte[] Mac()
+    {
+        lock (_registersLock)
+            return [.. Bytes(0x0008, 4)[2..], .. Bytes(0x000C, 4)];
+    }
+
+    public bool HasController
+    {
+        get { lock (_registersLock) return _primaryController is not null; }
+    }
+
+    // the address an application forced onto us, once it is actually in use
+    public void SetSubnetAndGateway(IPAddress subnetMask, IPAddress gateway)
+    {
+        lock (_registersLock)
+        {
+            subnetMask.GetAddressBytes().CopyTo(Bytes(0x0034, 4));
+            gateway.GetAddressBytes().CopyTo(Bytes(0x0044, 4));
+        }
+    }
 
     public void OnMessageChannel(Action<IPEndPoint?> hook) => _messageChannel = hook;
 

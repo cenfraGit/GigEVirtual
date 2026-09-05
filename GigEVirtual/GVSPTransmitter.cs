@@ -65,6 +65,11 @@ internal record StreamSettings(
     // carries is what produced that block. a device with nothing to add leaves
     // this alone and its blocks stay plain images.
     public Func<(uint Id, byte[] Data)[]> Chunks { get; init; } = () => [];
+
+    // how many finished blocks the transmitter keeps for resend. a real camera
+    // sizes this from the memory it set aside, so a device that lets an
+    // application change that amount says so here.
+    public Func<int> ResendBlocks { get; init; } = () => 2;
 }
 
 internal class GVSPTransmitter
@@ -99,8 +104,6 @@ internal class GVSPTransmitter
     // has status codes for a packet it has already thrown away.
     private readonly Dictionary<ulong, byte[]?[]> _recent = [];
     private readonly object _recentLock = new();
-
-    private const int RecentBlocks = 2;
 
     // bit 15 of the gvsp flag field, which the spec numbers from the msb, so it
     // is the low bit of the second flag byte
@@ -216,6 +219,10 @@ internal class GVSPTransmitter
             _cts = new();
         }
 
+        // scsp0: the port this transfer goes out from, so an application can let
+        // it back in through its own firewall. the same story as MCSP.
+        _deviceState.WriteUint(0x0D1C, (uint)((IPEndPoint)client.Client.LocalEndPoint!).Port);
+
         // Task.Run, not a bare call: an async method runs inline until its first
         // await, and Stream only awaits at the end of a block. calling it
         // directly would send a whole frame on the GVCP thread before we get to
@@ -299,6 +306,8 @@ internal class GVSPTransmitter
             _udpClient = null;
         }
 
+        _deviceState.WriteUint(0x0D1C, 0);
+
         // stopping while not streaming is not an error
         return GVCPStatus.GEV_STATUS_SUCCESS;
     }
@@ -314,6 +323,8 @@ internal class GVSPTransmitter
             _udpClient?.Dispose();
             _udpClient = null;
         }
+
+        _deviceState.WriteUint(0x0D1C, 0);
     }
 
     // returns false once this run is over, which is the streaming task's cue to
@@ -341,7 +352,9 @@ internal class GVSPTransmitter
         {
             _recent[blockId] = kept;
 
-            while (_recent.Count > RecentBlocks)
+            int keep = Math.Max(1, _settings.ResendBlocks());
+
+            while (_recent.Count > keep)
                 _recent.Remove(_recent.Keys.Min());
         }
 
