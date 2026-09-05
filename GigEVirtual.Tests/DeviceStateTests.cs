@@ -241,6 +241,112 @@ public class DeviceStateTests
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0xA000, U32(320)));
     }
 
+    // --------------------------------------------------------------- timestamp
+
+    // latch is bit 30 and reset is bit 31 in spec numbering
+    private const uint Latch = 2;
+    private const uint Reset = 1;
+
+    private static ulong LatchedTimestamp(DeviceState state)
+    {
+        state.ReadRegister(0x0948, out byte[]? high);
+        state.ReadRegister(0x094C, out byte[]? low);
+        return ((ulong)ReadU32(high!) << 32) | ReadU32(low!);
+    }
+
+    [Fact]
+    public void TickFrequencyIsOneGigahertz()
+    {
+        var state = new DeviceState();
+
+        state.ReadRegister(0x093C, out byte[]? high);
+        state.ReadRegister(0x0940, out byte[]? low);
+
+        Assert.Equal(0u, ReadU32(high!));
+        Assert.Equal(1_000_000_000u, ReadU32(low!));
+    }
+
+    [Fact]
+    public void TimestampAdvances()
+    {
+        var state = new DeviceState();
+
+        ulong first = state.Timestamp();
+        Thread.Sleep(50);
+        ulong second = state.Timestamp();
+
+        // Sleep only ever overshoots, so 50 ms is a safe floor. no ceiling, a
+        // loaded machine can take as long as it likes.
+        Assert.True(second - first >= 50_000_000ul, $"only advanced {second - first} ns");
+    }
+
+    [Fact]
+    public void ValueRegistersStayZeroUntilLatched()
+    {
+        var state = new DeviceState();
+
+        Thread.Sleep(20);
+
+        Assert.Equal(0ul, LatchedTimestamp(state));
+    }
+
+    [Fact]
+    public void LatchCopiesTheCounterIntoTheValueRegisters()
+    {
+        DeviceState state = Controlled();
+
+        Thread.Sleep(50);
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0944, U32(Latch)));
+
+        ulong latched = LatchedTimestamp(state);
+        Assert.True(latched >= 50_000_000ul, $"latched {latched} ns");
+
+        // and it holds still until the next latch
+        Thread.Sleep(50);
+        Assert.Equal(latched, LatchedTimestamp(state));
+    }
+
+    [Fact]
+    public void ControlRegisterSelfClears()
+    {
+        DeviceState state = Controlled();
+
+        state.WriteRegister(Controller, 0x0944, U32(Latch));
+
+        state.ReadRegister(0x0944, out byte[]? control);
+        Assert.Equal(0u, ReadU32(control!));
+    }
+
+    [Fact]
+    public void ResetPutsTheCounterBackToZero()
+    {
+        DeviceState state = Controlled();
+
+        Thread.Sleep(50);
+        ulong before = state.Timestamp();
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0944, U32(Reset)));
+
+        // the counter restarted, so it now reads less than it did before
+        Assert.True(state.Timestamp() < before, "counter did not restart");
+    }
+
+    [Fact]
+    public void LatchAndResetTogetherLatchFirst()
+    {
+        DeviceState state = Controlled();
+
+        Thread.Sleep(50);
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS,
+            state.WriteRegister(Controller, 0x0944, U32(Latch | Reset)));
+
+        // spec: the latched value is the counter as it stood before the reset,
+        // so it has to be ahead of what the counter reads now
+        ulong latched = LatchedTimestamp(state);
+        Assert.True(latched >= 50_000_000ul, $"latched {latched} ns");
+        Assert.True(state.Timestamp() < latched, "counter did not restart");
+    }
+
     // --------------------------------------------------------------- exclusive access
 
     // exclusive_access is CCP bit 31 in spec numbering, so the low bit

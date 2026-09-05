@@ -7,6 +7,7 @@
 // --------------------------------------------------------------------------------
 
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 
@@ -72,6 +73,9 @@ internal class DeviceState
     // set by the device, so closing the channel can stop streaming without this
     // class knowing GVSP exists
     private Action? _controlChannelClosed;
+
+    // where the free-running timestamp counter was last reset from
+    private long _timestampOrigin = Stopwatch.GetTimestamp();
 
     // --------------------------------------------------------------- constructors
 
@@ -195,6 +199,32 @@ internal class DeviceState
             if (ReadU32(v) < 500) BinaryPrimitives.WriteUInt32BigEndian(v, 500);
             return GVCPStatus.GEV_STATUS_SUCCESS;
         };
+
+        // timestamp tick frequency, high then low. 1 GHz, so one tick is one
+        // nanosecond. this is also the unit SCPD0 uses for its inter-packet delay,
+        // and the spec says that register has no effect without a timestamp
+        DefineUint(0x093C, RegAccess.ReadOnly, 0);
+        DefineUint(0x0940, RegAccess.ReadOnly, 1_000_000_000);
+
+        // timestamp control. the spec calls this write-only, but a self-clearing
+        // register behaves the same from the application side: writing a 1 runs
+        // the operation and there is no need to write 0 back afterwards
+        DefineUint(0x0944, RegAccess.ReadWrite, 0, selfClearing: true).OnWrite = (_, v) =>
+        {
+            // latch is bit 30 and reset is bit 31 in spec numbering, so the low
+            // two bits. spec says latch first when an application sets both
+            uint control = ReadU32(v);
+
+            if ((control & 0x2) != 0) LatchTimestamp();
+            if ((control & 0x1) != 0) _timestampOrigin = Stopwatch.GetTimestamp();
+
+            return GVCPStatus.GEV_STATUS_SUCCESS;
+        };
+
+        // latched timestamp value, high then low. latching is what makes two
+        // 32-bit reads add up to one coherent 64-bit value
+        DefineUint(0x0948, RegAccess.ReadOnly, 0);
+        DefineUint(0x094C, RegAccess.ReadOnly, 0);
 
         // control channel privilege. writable without control, (how
         // control gets claimed in the first place)
@@ -561,4 +591,19 @@ internal class DeviceState
     }
 
     public void OnControlChannelClosed(Action hook) => _controlChannelClosed = hook;
+
+    // free-running counter in the units the tick frequency register reports
+    // we fix that at 1 GHz, so a tick is a nanosecond
+    public ulong Timestamp()
+    {
+        long elapsed = Stopwatch.GetTimestamp() - _timestampOrigin;
+        return (ulong)(elapsed * (1_000_000_000.0 / Stopwatch.Frequency));
+    }
+
+    private void LatchTimestamp()
+    {
+        ulong now = Timestamp();
+        PokeUint(0x0948, (uint)(now >> 32));
+        PokeUint(0x094C, (uint)now);
+    }
 }

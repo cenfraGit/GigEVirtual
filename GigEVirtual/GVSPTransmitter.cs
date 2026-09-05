@@ -5,6 +5,7 @@
 // --------------------------------------------------------------------------------
 
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 
@@ -20,6 +21,10 @@ internal class GVSPTransmitter
     private IPAddress _bindAddress;
     private UdpClient? _udpClient;
     private int _packetSize;
+
+    // SCPD0 converted into Stopwatch ticks
+    private long _packetDelayTicks;
+
     private int _width;
     private int _height;
     private uint _pixelFormat;
@@ -67,6 +72,12 @@ internal class GVSPTransmitter
         // packet_size is last two bytes
         _packetSize = BinaryPrimitives.ReadUInt16BigEndian(scps0.AsSpan(2,2));
 
+        // SCPD0 (inter-packet delay). the spec measures it in timestamp ticks,
+        // and ours are nanoseconds
+        _deviceState.ReadRegister(0x0D08, out byte[]? scpd0);
+        long delayNanoseconds = BinaryPrimitives.ReadUInt32BigEndian(scpd0);
+        _packetDelayTicks = delayNanoseconds * Stopwatch.Frequency / 1_000_000_000;
+
         // width
         _deviceState.ReadRegister(0xA000, out byte[]? widthOut);
         _width = BinaryPrimitives.ReadInt32BigEndian(widthOut);
@@ -89,7 +100,8 @@ internal class GVSPTransmitter
             _udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, [0], null);
         }
 
-        Console.WriteLine($"[GVSP] StartAcquisition: dest={destinationIP}:{port}, packetSize={_packetSize}");
+        Console.WriteLine($"[GVSP] StartAcquisition: dest={destinationIP}:{port}, " +
+            $"packetSize={_packetSize}, packetDelay={delayNanoseconds}ns");
 
         _cts = new();
 
@@ -134,6 +146,7 @@ internal class GVSPTransmitter
             // build leader
             byte[] leader = BuildDataLeader();
             _udpClient?.Send(leader);
+            Pace();
 
             // build data payload
             // spec says for data payload packets, the packet size
@@ -146,6 +159,7 @@ internal class GVSPTransmitter
                 int chunkSize = Math.Min(usablePayloadPerPacket, frame.Length - i);
                 payload = BuildDataPayload(frame, i, chunkSize);
                 _udpClient?.Send(payload);
+                Pace();
             }
 
             // build trailer
@@ -157,6 +171,18 @@ internal class GVSPTransmitter
 
             await Task.Delay(800);
         }
+    }
+
+    // holds off the next packet by the delay the application asked for in SCPD0.
+    // Task.Delay cannot do sub-millisecond, and inter-packet delays are typically
+    // a few microseconds, so this spins
+    private void Pace()
+    {
+        if (_packetDelayTicks <= 0) return;
+
+        long until = Stopwatch.GetTimestamp() + _packetDelayTicks;
+        while (Stopwatch.GetTimestamp() < until)
+            Thread.SpinWait(1);
     }
 
     // all gvsp packets share the same header.
@@ -221,13 +247,16 @@ internal class GVSPTransmitter
         BinaryPrimitives.WriteUInt16BigEndian(leader.AsSpan(offset, 2), 0x0001);
         offset += 2;
 
-        // we'll leave timestamp (optional), offsets (no roi), and paddings (not used)
-        // set to 0 for now
+        // offsets (no roi) and paddings (not used) stay 0
+
+        ulong timestamp = _deviceState.Timestamp();
 
         // timestamp (high) (4 bytes)
+        BinaryPrimitives.WriteUInt32BigEndian(leader.AsSpan(offset, 4), (uint)(timestamp >> 32));
         offset += 4;
 
         // timestamp (low) (4 bytes)
+        BinaryPrimitives.WriteUInt32BigEndian(leader.AsSpan(offset, 4), (uint)timestamp);
         offset += 4;
 
         // pixel_format (4 bytes)
