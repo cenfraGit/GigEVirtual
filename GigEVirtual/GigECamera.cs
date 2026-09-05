@@ -92,8 +92,9 @@ public class GigECamera : GigEDevice
                 : GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
         });
 
+        // nothing rides along with the image on this one, so no extra bytes
         state.GeometrySource(() => (state.ReadUint(Width), state.ReadUint(Height),
-                                    state.ReadUint(PixelFormat)));
+                                    state.ReadUint(PixelFormat), 0u));
 
         // seed the payload registers from the defaults above
         state.RecomputePayload(640, 480, GVSPPixelFormats.Mono8);

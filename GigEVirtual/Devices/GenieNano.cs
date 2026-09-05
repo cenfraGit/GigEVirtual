@@ -115,6 +115,32 @@ public class GenieNano : GigEDevice
     private const uint NextValidEnable = 0x200014A0;
     private const uint ExposureEndEnable = 0x20001490;
 
+    // chunk mode, and the capability bit the description reads to decide whether
+    // this camera has metadata at all
+    private const uint ChunkModeActive = 0x20001B80;
+    private const uint ChunkCapability = 0x20001BB0;
+
+    // the description declares one chunk, not one per field: every chunk feature
+    // reads out of this single blob at a fixed offset. the offsets below are
+    // those, and the last field ends the blob at 136 bytes.
+    private const uint ChunkId = 0xCD000001;
+    private const int ChunkSize = 136;
+
+    private const int ChunkExposureTime = 8;
+    private const int ChunkGain = 40;
+    private const int ChunkWidth = 56;
+    private const int ChunkHeight = 58;
+    private const int ChunkTimestamp = 64;
+    private const int ChunkBinning = 72;
+    private const int ChunkDeviceId = 88;
+    private const int ChunkUserName = 104;
+    private const int ChunkPixelFormat = 120;
+
+    // the chunk carries the camera's own identity, which lives in the bootstrap
+    // registers at the addresses the spec fixes for them
+    private const uint SerialNumberAddress = 0x00D8;
+    private const uint UserNameAddress = 0x00E8;
+
     // the description reaches 0xB0000000, so the blob sits clear of all of it
     private const uint XmlAddress = 0xF0000000;
 
@@ -269,7 +295,8 @@ public class GenieNano : GigEDevice
         state.DefineFromXml(System.Text.Encoding.UTF8.GetString(xml));
 
         state.GeometrySource(() => (state.ReadUint(Width), state.ReadUint(Height),
-                                    state.ReadUint(PixelFormat)));
+                                    state.ReadUint(PixelFormat),
+                                    ChunkExtra(state.ReadUint(ChunkModeActive) != 0)));
 
         state.RecomputePayload(SensorWidth, SensorHeight, GVSPPixelFormats.Mono8);
 
@@ -345,6 +372,13 @@ public class GenieNano : GigEDevice
         Define(state, NextValidEnable, 0);
         Define(state, ExposureEndEnable, 0);
 
+        // changing this mid-transfer would move the chunk out from under a
+        // parser that is halfway through a block, so it answers BUSY instead.
+        // the description locks it the same way, behind TLParamsLocked.
+        Define(state, ChunkModeActive, 0, (_, v) =>
+            SetGeometry(state, chunk: Read(v) != 0)).LockedWhileStreaming = true;
+
+        DefineReadOnly(state, ChunkCapability, 1);
         DefineReadOnly(state, PixelFormatCaps, MonoFormats);
         DefineReadOnly(state, FrameRateMin, MinFrameRate);
         DefineReadOnly(state, FrameRateMax, MaxFrameRate);
@@ -375,9 +409,9 @@ public class GenieNano : GigEDevice
 
     // every register the nano owns is little-endian, and the byte order has to be
     // settled before the default value goes in
-    private static void Define(DeviceState state, uint address, uint value,
-                               Func<System.Net.IPEndPoint, byte[], ushort>? onWrite = null,
-                               bool selfClearing = false) =>
+    private static Register Define(DeviceState state, uint address, uint value,
+                                   Func<System.Net.IPEndPoint, byte[], ushort>? onWrite = null,
+                                   bool selfClearing = false) =>
         state.DefineUint(address, RegAccess.ReadWrite, value,
                          selfClearing: selfClearing, onWrite: onWrite,
                          endianness: Endianness.Little);
@@ -395,7 +429,8 @@ public class GenieNano : GigEDevice
             : GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
 
     private static ushort SetGeometry(DeviceState state, uint? width = null,
-                                      uint? height = null, uint? pixelFormat = null)
+                                      uint? height = null, uint? pixelFormat = null,
+                                      bool? chunk = null)
     {
         uint w = width ?? state.ReadUint(Width);
         uint h = height ?? state.ReadUint(Height);
@@ -406,8 +441,16 @@ public class GenieNano : GigEDevice
         if (h < 1 || h > SensorHeight)
             return GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
 
-        return state.RecomputePayload(w, h, pixelFormat ?? state.ReadUint(PixelFormat));
+        // a hook runs before its value is stored, so whatever is changing has to
+        // be passed in rather than read back out of the register
+        return state.RecomputePayload(w, h, pixelFormat ?? state.ReadUint(PixelFormat),
+            ChunkExtra(chunk ?? state.ReadUint(ChunkModeActive) != 0));
     }
+
+    // what chunk mode adds to a block: the metadata and its tag, plus the tag the
+    // image itself gains once it stops being the whole payload and becomes the
+    // first chunk of one
+    private static uint ChunkExtra(bool on) => on ? (uint)ChunkSize + 8 + 8 : 0;
 
     internal static StreamSettings Settings(Built built)
     {
@@ -428,8 +471,62 @@ public class GenieNano : GigEDevice
             TriggerDelay = () => TimeSpan.FromMicroseconds(state.ReadUint(TriggerDelay)),
             BlockLimit = () => BlockLimit(state),
             Report = (phase, blockId) => Report(state, phase, blockId),
+            Chunks = () => Chunks(state),
         };
     }
+
+    // --------------------------------------------------------------- chunk data
+
+    // the metadata the description asks for, as one blob whose fields sit at
+    // fixed offsets. everything in it is little-endian, and everything in it
+    // describes the block it rides with rather than the camera's state now.
+    internal static (uint Id, byte[] Data)[] Chunks(DeviceState state)
+    {
+        if (state.ReadUint(ChunkModeActive) == 0) return [];
+
+        byte[] chunk = new byte[ChunkSize];
+
+        Write64(chunk, ChunkExposureTime, state.ReadUint(ExposureTime));
+
+        // the description reads this one back as (raw / 512) + 1, so the raw
+        // value has to be the gain factor scaled to come out the other side
+        Write64(chunk, ChunkGain, (ulong)((GainFactor(state) - 1f) * 512f));
+
+        Write16(chunk, ChunkWidth, (ushort)state.ReadUint(Width));
+        Write16(chunk, ChunkHeight, (ushort)state.ReadUint(Height));
+        Write64(chunk, ChunkTimestamp, state.Timestamp());
+
+        // horizontal binning in the low nibble, vertical in the high one. no
+        // binning is a factor of one either way, not zero.
+        chunk[ChunkBinning] = 0x11;
+
+        Ascii(state, chunk, ChunkDeviceId, SerialNumberAddress);
+        Ascii(state, chunk, ChunkUserName, UserNameAddress);
+        Write64(chunk, ChunkPixelFormat, state.ReadUint(PixelFormat));
+
+        // what is left reads as zero, which is the right answer for all of it:
+        // no roi offset, no cycling preset, no counters, no test image and no
+        // exposure delay. line status is the one that is zero for want of a line
+        // whose level we actually track.
+
+        return [(ChunkId, chunk)];
+    }
+
+    private static void Write16(byte[] chunk, int offset, ushort value) =>
+        BinaryPrimitives.WriteUInt16LittleEndian(chunk.AsSpan(offset, 2), value);
+
+    private static void Write64(byte[] chunk, int offset, ulong value) =>
+        BinaryPrimitives.WriteUInt64LittleEndian(chunk.AsSpan(offset, 8), value);
+
+    // the two string fields are 16 bytes each and come straight out of the
+    // bootstrap registers holding the same text
+    private static void Ascii(DeviceState state, byte[] chunk, int offset, uint address)
+    {
+        state.ReadMemory(address, 16, out byte[]? text);
+        text?.CopyTo(chunk, offset);
+    }
+
+    // --------------------------------------------------------------- streaming
 
     // a sensor cannot produce frames faster than it takes to expose one, so a
     // long exposure holds the rate down however fast the register asks for
@@ -452,13 +549,13 @@ public class GenieNano : GigEDevice
 
     // a sensor collects light in proportion to how long it is exposed, and gain
     // amplifies whatever it collected
-    internal static float Brightness(DeviceState state)
-    {
-        float exposure = state.ReadUint(ExposureTime) / ReferenceExposure;
-        float gain = MathF.Pow(10f, state.ReadUint(Gain) / 200f);
+    internal static float Brightness(DeviceState state) =>
+        state.ReadUint(ExposureTime) / ReferenceExposure * GainFactor(state);
 
-        return exposure * gain;
-    }
+    // the description stores gain as 200*log10 of the factor, so going back the
+    // other way is a power of ten. a register of 0 is unity gain.
+    private static float GainFactor(DeviceState state) =>
+        MathF.Pow(10f, state.ReadUint(Gain) / 200f);
 
     private static uint Read(byte[] value) => BinaryPrimitives.ReadUInt32LittleEndian(value);
 }

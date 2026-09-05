@@ -60,6 +60,11 @@ internal record StreamSettings(
     // called as the transfer passes each of those moments, with the block it is
     // on. a device with nothing to announce leaves this alone.
     public Action<StreamPhase, ulong> Report { get; init; } = (_, _) => { };
+
+    // metadata to append to every block, asked for once per block since what it
+    // carries is what produced that block. a device with nothing to add leaves
+    // this alone and its blocks stay plain images.
+    public Func<(uint Id, byte[] Data)[]> Chunks { get; init; } = () => [];
 }
 
 internal class GVSPTransmitter
@@ -109,6 +114,18 @@ internal class GVSPTransmitter
     public int DropOneIn { get; set; }
 
     private const int gvspHeaderSize = 20;
+
+    // the chunk id genicam gives the image itself. in extended chunk mode the
+    // image is the first chunk of the payload and carries a tag like any other.
+    private const uint ImageChunkId = 0x617D18DB;
+
+    // our chunk layout never changes, so this never changes either. the spec
+    // reserves 0 for transmitters that do not track the layout at all.
+    private const uint ChunkLayoutId = 1;
+
+    // how much of this block is chunk-format payload, tags included. zero when
+    // the device appends nothing and the block is a plain image.
+    private uint _chunkPayloadLength;
 
     private ImageSource _imageSource;
     private StreamSettings _settings;
@@ -466,10 +483,16 @@ internal class GVSPTransmitter
 
             _settings.Report(StreamPhase.ExposureEnd, _block_id);
 
+            // chunk data rides in the same payload as the image, so it is
+            // packetised with it rather than sent on its own. this has to happen
+            // before the leader goes out, since the leader says whether the
+            // block is a plain image or an image with metadata behind it.
+            byte[] payload = WithChunks(frame, _settings.Chunks());
+
             // spec says for data payload packets, the packet size
             // is IP header + UDP header + GVSP header
             int usablePayloadPerPacket = _packetSize - 20 - 8 - gvspHeaderSize;
-            int payloadPackets = (frame.Length + usablePayloadPerPacket - 1) / usablePayloadPerPacket;
+            int payloadPackets = (payload.Length + usablePayloadPerPacket - 1) / usablePayloadPerPacket;
 
             // somewhere for a resend request to find this block. the leader and
             // the trailer are packets too, so the count is the payloads plus two.
@@ -482,10 +505,10 @@ internal class GVSPTransmitter
             // build data payload
             int packetId = 1;
 
-            for (int i = 0; i < frame.Length; i += usablePayloadPerPacket)
+            for (int i = 0; i < payload.Length; i += usablePayloadPerPacket)
             {
-                int chunkSize = Math.Min(usablePayloadPerPacket, frame.Length - i);
-                if (!Emit(kept, packetId++, BuildDataPayload(frame, i, chunkSize), ct)) return;
+                int size = Math.Min(usablePayloadPerPacket, payload.Length - i);
+                if (!Emit(kept, packetId++, BuildDataPayload(payload, i, size), ct)) return;
                 Pace();
             }
 
@@ -535,6 +558,50 @@ internal class GVSPTransmitter
         while (Stopwatch.GetTimestamp() < until)
             Thread.SpinWait(1);
     }
+
+    // in extended chunk mode the payload is a sequence of chunks rather than a
+    // bare image: each is its data padded out to a multiple of four, then the
+    // chunk id and the padded length, both big-endian. the image is the first of
+    // them. a parser reads the sequence backwards from the end, which is what
+    // lets a transmitter send chunks whose length it did not know when it
+    // started.
+    private byte[] WithChunks(byte[] frame, (uint Id, byte[] Data)[] chunks)
+    {
+        _chunkPayloadLength = 0;
+        if (chunks.Length == 0) return frame;
+
+        static int Tagged(int length) => (length + 3) / 4 * 4 + 8;
+
+        int total = Tagged(frame.Length);
+        foreach ((_, byte[] data) in chunks) total += Tagged(data.Length);
+
+        byte[] payload = new byte[total];
+
+        int at = WriteChunk(payload, 0, ImageChunkId, frame);
+        foreach ((uint id, byte[] data) in chunks) at = WriteChunk(payload, at, id, data);
+
+        _chunkPayloadLength = (uint)total;
+        return payload;
+    }
+
+    // one chunk: its data, zeroes up to a multiple of four, then the tag. the tag
+    // is big-endian whatever the data is, being part of the protocol rather than
+    // part of what the chunk carries.
+    private static int WriteChunk(byte[] payload, int at, uint id, byte[] data)
+    {
+        data.CopyTo(payload, at);
+
+        int padded = (data.Length + 3) / 4 * 4;
+
+        BinaryPrimitives.WriteUInt32BigEndian(payload.AsSpan(at + padded, 4), id);
+        BinaryPrimitives.WriteUInt32BigEndian(payload.AsSpan(at + padded + 4, 4), (uint)padded);
+
+        return at + padded + 8;
+    }
+
+    // image, or image with chunk data behind it. the difference is bit 1 of the
+    // payload type, which the spec numbers from the msb of the 16 bit field.
+    private ushort PayloadType => _chunkPayloadLength > 0 ? (ushort)0x4001 : (ushort)0x0001;
 
     // all gvsp packets share the same header.
     // packet_format says:
@@ -594,8 +661,7 @@ internal class GVSPTransmitter
         offset += 1;
 
         // payload_type (2 bytes)
-        // 0x0001 is image payload type
-        BinaryPrimitives.WriteUInt16BigEndian(leader.AsSpan(offset, 2), 0x0001);
+        BinaryPrimitives.WriteUInt16BigEndian(leader.AsSpan(offset, 2), PayloadType);
         offset += 2;
 
         // offsets (no roi) and paddings (not used) stay 0
@@ -654,7 +720,12 @@ internal class GVSPTransmitter
 
     private byte[] BuildDataTrailer()
     {
-        byte[] trailer = new byte[gvspHeaderSize + 8];
+        // a chunked block says two more things here, which is the only place a
+        // receiver can learn them: the last payload packet may be padded, so the
+        // end of the chunk sequence cannot be worked out from the packets alone
+        bool chunked = _chunkPayloadLength > 0;
+
+        byte[] trailer = new byte[gvspHeaderSize + (chunked ? 16 : 8)];
 
         // we'll copy the header at the end
         int offset = gvspHeaderSize;
@@ -664,13 +735,23 @@ internal class GVSPTransmitter
         offset += 2;
 
         // payload_type (2 bytes)
-        // 0x0001 is image payload type
-        BinaryPrimitives.WriteUInt16BigEndian(trailer.AsSpan(offset, 2), 0x0001);
+        BinaryPrimitives.WriteUInt16BigEndian(trailer.AsSpan(offset, 2), PayloadType);
         offset += 2;
 
         // size_y (4 bytes)
         BinaryPrimitives.WriteUInt32BigEndian(trailer.AsSpan(offset, 4), (uint)_height);
         offset += 4;
+
+        if (chunked)
+        {
+            // how far the chunk sequence runs into the payload, tags and the
+            // image included
+            BinaryPrimitives.WriteUInt32BigEndian(trailer.AsSpan(offset, 4), _chunkPayloadLength);
+            offset += 4;
+
+            BinaryPrimitives.WriteUInt32BigEndian(trailer.AsSpan(offset, 4), ChunkLayoutId);
+            offset += 4;
+        }
 
         // copy header
         byte[] header = BuildGVSPHeader(2);

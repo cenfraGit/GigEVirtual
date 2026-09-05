@@ -67,6 +67,9 @@ public class GenieNanoTests : IDisposable
     private const ushort NextValidEvent = 0x9C44;
     private const ushort ExposureEndEvent = 0x9C46;
 
+    private const uint ChunkModeActive = 0x20001B80;
+    private const uint ChunkCapability = 0x20001BB0;
+
     private readonly string _dir;
     private readonly string _xmlPath;
     private readonly GenieNano.Built _built;
@@ -330,6 +333,11 @@ public class GenieNanoTests : IDisposable
 
         _transmitter = new GVSPTransmitter(_state, IPAddress.Loopback, new ImageSource(),
                                            GenieNano.Settings(_built));
+
+        // the same seam a device wires up, so registers that lock during a
+        // transfer actually lock here too
+        _state.StreamingCheck(() => _transmitter.IsStreaming);
+
         return _transmitter;
     }
 
@@ -770,5 +778,119 @@ public class GenieNanoTests : IDisposable
         Assert.False(GenieNano.Pulse(_built, 2));
 
         Assert.Empty(Events());
+    }
+
+    // --------------------------------------------------------------- chunk data
+
+    // the description declares one chunk with every field at a fixed offset
+    private const int ChunkSize = 136;
+
+    private static byte[] Chunk(DeviceState state)
+    {
+        (uint Id, byte[] Data)[] chunks = GenieNano.Chunks(state);
+
+        (uint id, byte[] data) = Assert.Single(chunks);
+
+        Assert.Equal(0xCD000001u, id);
+        Assert.Equal(ChunkSize, data.Length);
+
+        return data;
+    }
+
+    private static ulong Read64(byte[] chunk, int offset) =>
+        BinaryPrimitives.ReadUInt64LittleEndian(chunk.AsSpan(offset, 8));
+
+    private static ushort Read16(byte[] chunk, int offset) =>
+        BinaryPrimitives.ReadUInt16LittleEndian(chunk.AsSpan(offset, 2));
+
+    private static string Text(byte[] chunk, int offset) =>
+        Encoding.ASCII.GetString(chunk.AsSpan(offset, 16)).TrimEnd(' ');
+
+    // the description hides the whole chunk category unless this bit says the
+    // camera has metadata at all
+    [Fact]
+    public void TheChunkCapabilityIsAdvertised()
+    {
+        Assert.Equal(1u, _state.ReadUint(ChunkCapability));
+    }
+
+    [Fact]
+    public void NoMetadataIsAppendedUntilChunkModeIsOn()
+    {
+        Assert.Equal(0u, _state.ReadUint(ChunkModeActive));
+        Assert.Empty(GenieNano.Chunks(_state));
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ChunkModeActive, 1));
+        Assert.Single(GenieNano.Chunks(_state));
+    }
+
+    // the point of the thing: what comes back describes the block it rode with
+    [Fact]
+    public void TheChunkCarriesTheSettingsThatProducedTheBlock()
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ChunkModeActive, 1));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ExposureTime, 20_000));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(Width, 640));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(Height, 480));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(PixelFormat, GVSPPixelFormats.Mono12));
+
+        byte[] chunk = Chunk(_state);
+
+        Assert.Equal(20_000ul, Read64(chunk, 8));
+        Assert.Equal(640, Read16(chunk, 56));
+        Assert.Equal(480, Read16(chunk, 58));
+        Assert.Equal(GVSPPixelFormats.Mono12, (uint)Read64(chunk, 120));
+        Assert.NotEqual(0ul, Read64(chunk, 64)); // timestamp
+
+        // no binning, which is a factor of one each way rather than zero
+        Assert.Equal(0x11, chunk[72]);
+
+        Assert.Equal("S1234567", Text(chunk, 88));
+        Assert.Equal("Nano-M1920", Text(chunk, 104));
+    }
+
+    // the description reads the raw value back as (raw / 512) + 1, so the raw
+    // value has to be the gain factor scaled to survive that
+    [Fact]
+    public void TheChunkGainReadsBackAsTheFactorInUse()
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ChunkModeActive, 1));
+
+        // 200 * log10(4) is 120, so this asks for a factor of four
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(Gain, 120));
+
+        double factor = Read64(Chunk(_state), 40) / 512.0 + 1;
+        Assert.Equal(4.0, factor, 1);
+    }
+
+    // an application sizes its buffers from these, so the metadata has to be
+    // counted in them: its own bytes and tag, and the tag the image gains
+    [Fact]
+    public void ChunkModeShowsUpInThePayloadRegisters()
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(Width, 640));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(Height, 480));
+
+        Assert.Equal(640u * 480u, PayloadSize());
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ChunkModeActive, 1));
+        Assert.Equal(640u * 480u + ChunkSize + 8 + 8, PayloadSize());
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ChunkModeActive, 0));
+        Assert.Equal(640u * 480u, PayloadSize());
+    }
+
+    // switching it mid-transfer would move the metadata out from under a parser
+    // that is halfway through a block
+    [Fact]
+    public void ChunkModeCannotChangeWhileABlockIsGoingOut()
+    {
+        GVSPTransmitter transmitter = Streaming();
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, transmitter.StartAcquisition());
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_BUSY, Write(ChunkModeActive, 1));
+
+        transmitter.StopAcquisition();
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ChunkModeActive, 1));
     }
 }

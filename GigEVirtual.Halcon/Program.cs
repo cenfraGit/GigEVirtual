@@ -66,6 +66,7 @@ internal class Program
         Lossy(handle, nano);
         Triggered(handle, nano);
         Events(handle);
+        Chunked(handle);
 
         HOperatorSet.CloseFramegrabber(handle);
     }
@@ -278,6 +279,86 @@ internal class Program
 
     private static readonly List<CallbackFunction> _callbacks = [];
     private static readonly Dictionary<string, int> _fired = [];
+
+    // metadata rides in the same payload as the image, behind it, tagged so a
+    // parser can pick it apart. halcon exposes each field as a feature it can
+    // only answer once it has a block to read it out of.
+    private static void Chunked(HTuple handle)
+    {
+        Console.WriteLine("--- chunk data");
+
+        try
+        {
+            HOperatorSet.SetFramegrabberParam(handle, "TriggerMode", "Off");
+            HOperatorSet.SetFramegrabberParam(handle, "ChunkModeActive", 1);
+            HOperatorSet.GetFramegrabberParam(handle, "ChunkModeActive", out HTuple active);
+            HOperatorSet.GetFramegrabberParam(handle, "PayloadSize", out HTuple payload);
+
+            Console.WriteLine($"  ChunkModeActive = {Show(active)}, PayloadSize = {Show(payload)}");
+        }
+        catch (HOperatorException e)
+        {
+            Report("switching chunk mode on", e);
+            return;
+        }
+
+        try
+        {
+            HOperatorSet.SetFramegrabberParam(handle, "grab_timeout", 5000);
+            HOperatorSet.GrabImage(out HObject image, handle);
+            HOperatorSet.GetImageSize(image, out HTuple width, out HTuple height);
+
+            HOperatorSet.GetFramegrabberParam(handle, "buffer_is_incomplete", out HTuple incomplete);
+            Console.WriteLine($"  grabbed {width[0].I} x {height[0].I}, incomplete={Show(incomplete)}");
+
+            image.Dispose();
+        }
+        catch (HOperatorException e)
+        {
+            Report("chunked grab", e);
+            return;
+        }
+
+        string[] fields =
+        [
+            "ChunkExposureTime", "ChunkGain", "ChunkWidth", "ChunkHeight",
+            "ChunkTimestamp", "ChunkPixelFormat", "ChunkBinningHorizontal",
+            "ChunkBinningVertical", "ChunkDeviceID", "ChunkDeviceUserID",
+            "ChunkOffsetX", "ChunkOffsetY", "ChunkLineStatusAll",
+        ];
+
+        foreach (string name in fields)
+        {
+            try
+            {
+                HOperatorSet.GetFramegrabberParam(handle, name, out HTuple value);
+                Console.WriteLine($"  {name} = {Show(value)}");
+            }
+            catch (HOperatorException e)
+            {
+                Console.WriteLine($"  {name} FAILED {e.GetErrorCode()}: {e.GetErrorMessage()}");
+            }
+        }
+
+        // and the shape the hdevelop script uses, which keeps the transfer open
+        // across grabs rather than starting one per image
+        try
+        {
+            HOperatorSet.GrabImageStart(handle, -1);
+
+            for (int i = 0; i < 3; i++)
+            {
+                HOperatorSet.GrabImageAsync(out HObject image, handle, -1);
+                HOperatorSet.GetFramegrabberParam(handle, "ChunkTimestamp", out HTuple stamp);
+                Console.WriteLine($"  async grab {i}, ChunkTimestamp = {Show(stamp)}");
+                image.Dispose();
+            }
+        }
+        catch (HOperatorException e)
+        {
+            Report("async chunked grabs", e);
+        }
+    }
 
     // events reach an application over a channel of its own, which it opens
     // rather than us. the device log says what went down that channel; the

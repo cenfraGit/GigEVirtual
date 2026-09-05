@@ -41,6 +41,7 @@ public class GVSPTransmitterTests : IDisposable
     public void Dispose()
     {
         _transmitter.StopAcquisition();
+        _chunked?.StopAcquisition();
         _receiver.Dispose();
     }
 
@@ -454,5 +455,146 @@ public class GVSPTransmitterTests : IDisposable
 
         // the extended form needs the eight extra bytes of block id
         Assert.Null(GVCPServer.ParsePacketResend(0x10, new byte[12]));
+    }
+
+    // --------------------------------------------------------------- chunk data
+
+    private GVSPTransmitter? _chunked;
+
+    // the plain camera appends nothing, so the metadata comes from here: what is
+    // under test is the framing rather than any particular device's fields
+    private GVSPTransmitter Chunked(params (uint Id, byte[] Data)[] chunks)
+    {
+        WriteFloat(0xA018, 2.0f);
+
+        _chunked = new GVSPTransmitter(_state, IPAddress.Loopback, new ImageSource(),
+            GigECamera.Settings(_state) with { Chunks = () => chunks });
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, _chunked.StartAcquisition());
+
+        return _chunked;
+    }
+
+    private static ushort PayloadType(byte[] packet) =>
+        BinaryPrimitives.ReadUInt16BigEndian(packet.AsSpan(gvspHeader + 2, 2));
+
+    // the payload of one block, put back together from its packets in order
+    private static byte[] Payload(List<byte[]> packets, ulong blockId)
+    {
+        byte[][] data = [.. packets
+            .Where(p => BlockId(p) == blockId && PacketFormat(p) == 3)
+            .OrderBy(PacketId)];
+
+        return [.. data.SelectMany(p => p.Skip(gvspHeader))];
+    }
+
+    private const int gvspHeader = 20;
+
+    [Fact]
+    public void APlainBlockSaysItIsJustAnImage()
+    {
+        List<byte[]> packets = OneBlock();
+
+        byte[] leader = packets.First(p => PacketFormat(p) == 1);
+        byte[] trailer = packets.First(p => PacketFormat(p) == 2);
+
+        Assert.Equal(0x0001, PayloadType(leader));
+        Assert.Equal(0x0001, PayloadType(trailer));
+
+        // reserved, payload_type and size_y, and nothing after them
+        Assert.Equal(gvspHeader + 8, trailer.Length);
+    }
+
+    // bit 1 of the payload type in spec numbering, which counts from the msb
+    [Fact]
+    public void AChunkedBlockSaysSoInTheLeaderAndTheTrailer()
+    {
+        Chunked((0xCD000001, new byte[16]));
+        List<byte[]> packets = Collect(TimeSpan.FromMilliseconds(300));
+
+        byte[] leader = packets.First(p => PacketFormat(p) == 1);
+        byte[] trailer = packets.First(p => PacketFormat(p) == 2);
+
+        Assert.Equal(0x4001, PayloadType(leader));
+        Assert.Equal(0x4001, PayloadType(trailer));
+        Assert.Equal(gvspHeader + 16, trailer.Length);
+    }
+
+    // the image stops being the whole payload and becomes the first of a
+    // sequence, tagged like everything else in it
+    [Fact]
+    public void TheImageIsTheFirstChunkAndCarriesItsOwnTag()
+    {
+        byte[] metadata = [1, 2, 3, 4, 5, 6, 7, 8];
+
+        Chunked((0xCD000001, metadata));
+        byte[] payload = Payload(Collect(TimeSpan.FromMilliseconds(300)), 1);
+
+        int image = 64 * 48;   // the geometry the fixture writes
+
+        Assert.Equal(image + 8 + metadata.Length + 8, payload.Length);
+
+        // the image tag: the genicam chunk id for an image, then its length
+        Assert.Equal(0x617D18DBu, BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(image, 4)));
+        Assert.Equal((uint)image, BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(image + 4, 4)));
+
+        // then the metadata, then its own tag
+        Assert.Equal(metadata, payload.AsSpan(image + 8, metadata.Length).ToArray());
+        Assert.Equal(0xCD000001u,
+            BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(image + 8 + metadata.Length, 4)));
+        Assert.Equal(8u,
+            BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(image + 12 + metadata.Length, 4)));
+    }
+
+    // the tag fields have to sit on a 4 byte boundary, so a chunk whose data does
+    // not is padded out and reports the padded length
+    [Fact]
+    public void ChunkDataIsPaddedUpToAMultipleOfFour()
+    {
+        Chunked((0xCD000001, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE]));
+        byte[] payload = Payload(Collect(TimeSpan.FromMilliseconds(300)), 1);
+
+        int image = 64 * 48;
+        int at = image + 8;
+
+        // five bytes of data, three of padding
+        Assert.Equal(new byte[] { 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0, 0, 0 },
+            payload.AsSpan(at, 8).ToArray());
+
+        Assert.Equal(8u, BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(at + 12, 4)));
+    }
+
+    // the last payload packet can be padded out, so the length in the trailer is
+    // the only way a receiver can find where the chunk sequence actually ends
+    [Fact]
+    public void TheTrailerSaysHowFarTheChunkSequenceRuns()
+    {
+        Chunked((0xCD000001, new byte[16]), (0xCD000002, new byte[4]));
+
+        List<byte[]> packets = Collect(TimeSpan.FromMilliseconds(300));
+        byte[] trailer = packets.First(p => PacketFormat(p) == 2);
+
+        int image = 64 * 48;
+        uint expected = (uint)(image + 8 + 16 + 8 + 4 + 8);
+
+        Assert.Equal(expected, BinaryPrimitives.ReadUInt32BigEndian(trailer.AsSpan(gvspHeader + 8, 4)));
+        Assert.Equal((uint)Payload(packets, 1).Length, expected);
+
+        // and a layout id, which must not be zero unless we never track it
+        Assert.NotEqual(0u, BinaryPrimitives.ReadUInt32BigEndian(trailer.AsSpan(gvspHeader + 12, 4)));
+    }
+
+    // chunks go out in the order the device gives them, since a parser walking
+    // back from the end has to meet them in reverse
+    [Fact]
+    public void ChunksArriveInTheOrderTheDeviceGaveThem()
+    {
+        Chunked((0xAAAAAAAA, new byte[4]), (0xBBBBBBBB, new byte[4]));
+        byte[] payload = Payload(Collect(TimeSpan.FromMilliseconds(300)), 1);
+
+        int first = 64 * 48 + 8;
+
+        Assert.Equal(0xAAAAAAAAu, BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(first + 4, 4)));
+        Assert.Equal(0xBBBBBBBBu, BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(first + 16, 4)));
     }
 }

@@ -37,12 +37,24 @@ set_framegrabber_param (AcqHandle, 'ExposureTime', 10000)
 * the delay the device waits after the pulse before it starts the frame
 set_framegrabber_param (AcqHandle, 'TriggerDelay', 0)
 
+* metadata rides behind the image in the same payload, tagged so halcon can pick
+* it apart. switch it on before the transfer starts: the device locks this while
+* a block is going out, the same way it locks the packet size.
+set_framegrabber_param (AcqHandle, 'ChunkModeActive', 1)
+
 grab_image_start (AcqHandle, -1)
 
 * one frame per keypress in the GigEVirtual console. stop the program to end it.
 while (true)
     grab_image_async (Image, AcqHandle, -1)
     dev_display (Image)
+
+    * these describe the frame just grabbed rather than the camera right now, so
+    * the timestamp moves with every frame and the exposure is the one that took
+    * it. the full set is under Chunk Parser in the feature tree.
+    get_framegrabber_param (AcqHandle, 'ChunkTimestamp', ChunkTimestamp)
+    get_framegrabber_param (AcqHandle, 'ChunkExposureTime', ChunkExposureTime)
+    get_framegrabber_param (AcqHandle, 'ChunkGain', ChunkGain)
 endwhile
 
 close_framegrabber (AcqHandle)

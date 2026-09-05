@@ -111,8 +111,9 @@ internal class DeviceState
 
     // set by the device: what it is currently configured to send. the payload
     // registers are bootstrap, but what belongs in them depends on geometry
-    // registers the device owns and places wherever it likes.
-    private Func<(uint Width, uint Height, uint PixelFormat)>? _geometry;
+    // registers the device owns and places wherever it likes. Extra is whatever
+    // a block carries on top of the image, which is chunk data and its tags.
+    private Func<(uint Width, uint Height, uint PixelFormat, uint Extra)>? _geometry;
 
     // the packet sizes we can actually serve. a request outside this gets
     // rounded rather than refused
@@ -348,9 +349,9 @@ internal class DeviceState
 
             if (_geometry is not null)
             {
-                (uint width, uint height, uint pixelFormat) = _geometry();
+                (uint width, uint height, uint pixelFormat, uint extra) = _geometry();
 
-                ushort status = UpdatePayloadSize(width, height, pixelFormat, granted);
+                ushort status = UpdatePayloadSize(width, height, pixelFormat, extra, granted);
                 if (status != GVCPStatus.GEV_STATUS_SUCCESS) return status;
             }
 
@@ -762,7 +763,8 @@ internal class DeviceState
 
     // recomputes SCMBS0 / SCMPC0. called whenever geometry, pixel format or
     // packet size changes, since the client sizes its buffers from these
-    private ushort UpdatePayloadSize(uint width, uint height, uint pixelFormat, uint packetSize)
+    private ushort UpdatePayloadSize(uint width, uint height, uint pixelFormat,
+                                     uint extra, uint packetSize)
     {
         // a device enforces its own minimum, increment and maximum. all this
         // needs is enough to do the arithmetic below.
@@ -777,7 +779,7 @@ internal class DeviceState
         if (packetSize < MinPacketSize || packetSize > MaxPacketSize)
             return GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
 
-        ulong payloadSize = (ulong)width * height * (ulong)format.BitsPerPixel / 8;
+        ulong payloadSize = (ulong)width * height * (ulong)format.BitsPerPixel / 8 + extra;
 
         PokeUint(0x0D34, (uint)(payloadSize >> 32));
         PokeUint(0x0D38, (uint)(payloadSize & 0xFFFFFFFF));
@@ -881,16 +883,16 @@ internal class DeviceState
 
     public void StreamingCheck(Func<bool> check) => _isStreaming = check;
 
-    public void GeometrySource(Func<(uint Width, uint Height, uint PixelFormat)> source) =>
+    public void GeometrySource(Func<(uint Width, uint Height, uint PixelFormat, uint Extra)> source) =>
         _geometry = source;
 
     // recomputes SCMBS0 and SCMPC0. a device calls this from its own geometry
     // hooks, passing the value being written rather than the one still stored,
     // since hooks run before the write lands.
-    public ushort RecomputePayload(uint width, uint height, uint pixelFormat)
+    public ushort RecomputePayload(uint width, uint height, uint pixelFormat, uint extra = 0)
     {
         lock (_registersLock)
-            return UpdatePayloadSize(width, height, pixelFormat, PeekUint(0x0D04) & 0xFFFF);
+            return UpdatePayloadSize(width, height, pixelFormat, extra, PeekUint(0x0D04) & 0xFFFF);
     }
 
     // free-running counter in the units the tick frequency register reports
