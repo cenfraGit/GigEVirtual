@@ -10,7 +10,7 @@ using System.Xml.Linq;
 
 namespace GigEVirtual;
 
-internal record XmlRegister(uint Address, int Length, RegAccess Access, string Name);
+internal record XmlRegister(uint Address, int Length, RegAccess Access, Endianness Endianness, string Name);
 
 internal static class GenICamXml
 {
@@ -59,6 +59,11 @@ internal static class GenICamXml
                 address,
                 (int)length,
                 Child(element, "AccessMode") == "RO" ? RegAccess.ReadOnly : RegAccess.ReadWrite,
+                // note the schema's spelling. left out means little-endian, which
+                // is the genicam default and what device registers overwhelmingly
+                // use. the big-endian bootstrap registers are ones we define
+                // ourselves, so this only ever applies to device space.
+                Child(element, "Endianess") == "BigEndian" ? Endianness.Big : Endianness.Little,
                 element.Attribute("Name")?.Value ?? element.Attribute("Comment")?.Value ?? "(unnamed)");
         }
 

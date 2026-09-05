@@ -15,6 +15,10 @@ namespace GigEVirtual;
 
 internal enum RegAccess { ReadOnly, ReadWrite }
 
+// the gige bootstrap registers are big-endian by definition. a device is free
+// to lay its own registers out the other way round, and most do.
+internal enum Endianness { Big, Little }
+
 internal class Register
 {
     public uint Address;
@@ -32,6 +36,11 @@ internal class Register
 
     // genicam command register. set to 0 again once the write goes through
     public bool SelfClearing;
+
+    // how a multi-byte value sits in this register's bytes. only matters where we
+    // read or write the value ourselves: an application reads the endianness out
+    // of the device description and we hand it the bytes either way.
+    public Endianness Endianness = Endianness.Big;
 
     // the stream channel registers describe a transfer in progress, so changing
     // them mid-stream would leave the application decoding against the wrong
@@ -408,7 +417,8 @@ internal class DeviceState
                 }
 
                 Define(register.Address, register.Length, register.Access,
-                       needsControl: true, selfClearing: false);
+                       needsControl: true, selfClearing: false)
+                    .Endianness = register.Endianness;
                 added++;
             }
 
@@ -521,11 +531,35 @@ internal class DeviceState
 
     // unchecked access straight to the register bytes, for our own use. client
     // traffic goes through ReadMemory/WriteMemory instead.
-    private uint PeekUint(uint address) =>
-        BinaryPrimitives.ReadUInt32BigEndian(Bytes(address, 4));
+    private uint PeekUint(uint address)
+    {
+        Span<byte> bytes = Bytes(address, 4);
 
-    private void PokeUint(uint address, uint value) =>
-        BinaryPrimitives.WriteUInt32BigEndian(Bytes(address, 4), value);
+        return EndiannessAt(address) == Endianness.Big
+            ? BinaryPrimitives.ReadUInt32BigEndian(bytes)
+            : BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+    }
+
+    private void PokeUint(uint address, uint value)
+    {
+        Span<byte> bytes = Bytes(address, 4);
+
+        if (EndiannessAt(address) == Endianness.Big)
+            BinaryPrimitives.WriteUInt32BigEndian(bytes, value);
+        else
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+    }
+
+    private Endianness EndiannessAt(uint address) =>
+        Resolve(address)?.Endianness ?? Endianness.Big;
+
+    // the value of a 4-byte register, read the way that register stores it. this
+    // is what anything outside DeviceState should use rather than parsing the
+    // bytes itself and guessing at the byte order.
+    public uint ReadUint(uint address)
+    {
+        lock (_registersLock) return PeekUint(address);
+    }
 
     public ushort ReadMemory(uint address, ushort count, out byte[]? value)
     {

@@ -248,6 +248,60 @@ public class GenICamXmlTests
         Assert.Equal(["Low", "High"], registers.Select(r => r.Name));
     }
 
+    // --------------------------------------------------------------- byte order
+
+    [Theory]
+    [InlineData("<Endianess>BigEndian</Endianess>", true)]
+    [InlineData("<Endianess>LittleEndian</Endianess>", false)]
+    [InlineData("", false)] // genicam's default when the element is absent
+    public void ReadsTheByteOrder(string element, bool bigEndian)
+    {
+        List<XmlRegister> registers = Read($"""
+            <IntReg Name="R">
+                <Address>0x20000000</Address><Length>4</Length>
+                <AccessMode>RW</AccessMode><pPort>Device</pPort>
+                {element}
+            </IntReg>
+            """);
+
+        Assert.Equal(bigEndian ? Endianness.Big : Endianness.Little,
+                     Assert.Single(registers).Endianness);
+    }
+
+    [Fact]
+    public void ALittleEndianRegisterReadsBackTheWayItStoresIts()
+    {
+        var state = new DeviceState();
+        IPEndPoint controller = new(IPAddress.Parse("192.168.1.10"), 50000);
+        state.WriteRegister(controller, 0x0A00, [0, 0, 0, 2]);
+
+        // this is how the genie nano lays out its own registers
+        state.DefineFromXml(Xml("""
+            <IntReg Name="Little">
+                <Address>0x20000000</Address><Length>4</Length>
+                <AccessMode>RW</AccessMode><pPort>Device</pPort>
+                <Endianess>LittleEndian</Endianess>
+            </IntReg>
+            """));
+
+        // an application writes 0x000004D2 as the device stores it, low byte first
+        state.WriteRegister(controller, 0x20000000, [0xD2, 0x04, 0x00, 0x00]);
+
+        // the bytes come back untouched, and we read the value as 1234
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(0x20000000, out byte[]? raw));
+        Assert.Equal<byte[]>([0xD2, 0x04, 0x00, 0x00], raw!);
+        Assert.Equal(1234u, state.ReadUint(0x20000000));
+    }
+
+    [Fact]
+    public void ABigEndianBootstrapRegisterIsUnaffected()
+    {
+        var state = new DeviceState();
+
+        // spec version, which we define big-endian
+        Assert.Equal(0x00020002u, state.ReadUint(0x0000));
+    }
+
     // --------------------------------------------------------------- taking them on
 
     [Fact]
