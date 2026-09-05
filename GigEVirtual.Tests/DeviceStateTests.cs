@@ -107,7 +107,7 @@ public class DeviceStateTests
         DeviceState state = Controlled();
 
         // user-defined name lives at 0x00E8, so 0x00EC is mid-register
-        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_ADDRESS, state.WriteMemory(Controller, 0x00EC, U32(0)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_ADDRESS, state.WriteMemory(Controller, 0x00EC, U32(0), out _));
     }
 
     // --------------------------------------------------------------- access modes
@@ -122,7 +122,7 @@ public class DeviceStateTests
     }
 
     [Fact]
-    public void WriteSpanningIntoAReadOnlyRegisterIsRejectedWholesale()
+    public void WriteRunningOffTheEndOfTheMapChangesNothing()
     {
         DeviceState state = Controlled();
 
@@ -130,9 +130,56 @@ public class DeviceStateTests
         byte[] before = ReadBytes(state, 0x00E8, 16);
 
         Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_ADDRESS,
-            state.WriteMemory(Controller, 0x00E8, new byte[32]));
+            state.WriteMemory(Controller, 0x00E8, new byte[32], out int index));
 
+        Assert.Equal(0, index);
         Assert.Equal(before, ReadBytes(state, 0x00E8, 16));
+    }
+
+    [Fact]
+    public void SuccessfulWriteReportsTheByteCount()
+    {
+        DeviceState state = Controlled();
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS,
+            state.WriteMemory(Controller, 0x00E8, new byte[16], out int index));
+
+        Assert.Equal(16, index);
+    }
+
+    [Fact]
+    public void FailedWriteReportsTheOffsetItStoppedAtAndKeepsEarlierWrites()
+    {
+        DeviceState state = Controlled();
+
+        // width (valid) then height (0, which the hook rejects) in one write
+        byte[] value = [.. U32(320), .. U32(0)];
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_PARAMETER,
+            state.WriteMemory(Controller, 0xA000, value, out int index));
+
+        // height is 4 bytes in
+        Assert.Equal(4, index);
+
+        // the spec has writes before the failure stand
+        state.ReadRegister(0xA000, out byte[]? width);
+        Assert.Equal(320u, ReadU32(width!));
+
+        state.ReadRegister(0xA004, out byte[]? height);
+        Assert.Equal(480u, ReadU32(height!));
+    }
+
+    [Fact]
+    public void SwitchoverKeyAloneDoesNotClaimControl()
+    {
+        var state = new DeviceState();
+
+        // bits 0-15 are the switchover key, control lives in the low two bits
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Other, 0x0A00, U32(0xABCD0000)));
+
+        // nobody took control, so Controller can still claim it
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(2)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0xA000, U32(320)));
     }
 
     // --------------------------------------------------------------- control channel

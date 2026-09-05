@@ -167,17 +167,12 @@ internal class GVCPServer
             if (firstByte != 0x42)
                 continue;
 
-            // we might as well check if payload matches length
-            if (payload.Length != length)
-            {
-                PrintConsole($"Wrong payload length: header says: {length}, actual is {payload.Length}");
-                continue;
-            }
-
-            PrintConsole($"CMD from {result.RemoteEndPoint,-21}: " +
-                $"{GVCPMessages.GetName(command)} (0x{command:X4}) " +
-                $"length={length} " +
-                $"req_id={req_id}");
+            // bit 7 of the flag byte (its lsb, since the spec numbers bit 0 as the
+            // msb) is ACKNOWLEDGE. when it is clear the device must stay silent,
+            // even for commands that normally answer. this is how an application
+            // resets the heartbeat without getting a register value back, and
+            // PACKETRESEND always has it cleared.
+            bool acknowledgeRequired = (flag & 0x01) != 0;
 
             // helper method to print what ack was sent
             void PrintAck(Ack ack) =>
@@ -185,6 +180,29 @@ internal class GVCPServer
                 $"{GVCPMessages.GetName(ack.Message)} (0x{ack.Message:X4}) " +
                 $"{GVCPStatus.GetName(ack.Status)} (0x{ack.Status:X4}) " +
                 $"length={ack.Buffer.Length - 8}"); // buffer contains header already
+
+            // the spec always defines the acknowledge value as the command value + 1
+            ushort ackMessage = (ushort)(command + 1);
+
+            // we might as well check if payload matches length. req_id of 0 is
+            // never valid either, an application must use 1..65535.
+            if (payload.Length != length || req_id == 0)
+            {
+                PrintConsole($"Invalid header: length says {length}, actual is {payload.Length}, req_id={req_id}");
+
+                if (acknowledgeRequired)
+                {
+                    Ack invalid = BuildErrorAck(req_id, ackMessage, GVCPStatus.GEV_STATUS_INVALID_HEADER);
+                    await _udpClient.SendAsync(invalid.Buffer, invalid.Buffer.Length, result.RemoteEndPoint);
+                    PrintAck(invalid);
+                }
+                continue;
+            }
+
+            PrintConsole($"CMD from {result.RemoteEndPoint,-21}: " +
+                $"{GVCPMessages.GetName(command)} (0x{command:X4}) " +
+                $"length={length} " +
+                $"req_id={req_id}");
 
             // ------------------------------------------ CMD check
 
@@ -212,7 +230,6 @@ internal class GVCPServer
                     Console.WriteLine($"List of addresses to read: {string.Join(", ", addresses.Select(a => $"0x{a:X8}"))}");
 
                     ack = BuildReadRegAck(req_id, addresses);
-                    await _udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
                 case GVCPMessages.WRITEREG_CMD:
                     // WRITEREG_CMD payload consists of pairs of address + data,
@@ -237,7 +254,6 @@ internal class GVCPServer
 
                     // we'll do the logic in the write reg method
                     ack = BuildWriteRegAck(req_id, payload, result.RemoteEndPoint);
-                    await _udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
                 case GVCPMessages.READMEM_CMD:
                     // from payload: "address" (4 bytes) is the starting address
@@ -255,7 +271,6 @@ internal class GVCPServer
                     Console.WriteLine($"[READMEM] address is {address:X8}");
 
                     ack = BuildReadMemAck(req_id, address, count);
-                    await _udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
                 case GVCPMessages.WRITEMEM_CMD:
 
@@ -277,17 +292,17 @@ internal class GVCPServer
                     Console.WriteLine($"[WRITEMEM] addrss to start writing to: {addressToStartWritingTo:X8}");
 
                     ack = BuildWriteMemAck(req_id, addressToStartWritingTo, dataToWrite, result.RemoteEndPoint);
-                    await _udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
                 default:
-                    // ack ids are the command id with the low bit set (DISCOVERY_CMD
-                    // 0x0002 -> DISCOVERY_ACK 0x0003, and so on)
-                    ack = BuildErrorAck(req_id, (ushort)(command | 1), GVCPStatus.GEV_STATUS_NOT_IMPLEMENTED);
-                    await _udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
+                    ack = BuildErrorAck(req_id, ackMessage, GVCPStatus.GEV_STATUS_NOT_IMPLEMENTED);
                     break;
             }
 
-            PrintAck(ack);
+            if (acknowledgeRequired)
+            {
+                await _udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
+                PrintAck(ack);
+            }
         }
     }
 
@@ -456,13 +471,19 @@ internal class GVCPServer
             offset += 4;
         }
 
+        // spec says length must reflect the bytes that were read successfully, so
+        // on a partial failure the client still gets the registers we did read.
+        // trim the buffer to match, since the reads that failed left it padded.
+        ushort length = (ushort)(offset - 8);
+        Array.Resize(ref ack, 8 + length);
+
         // ------------------------------------------ header
 
         // reset to write header
         offset = 0;
 
         // status (2 bytes)
-        // note: its all or nothing, so if any operation fails, whole operation fails
+        // reads stop at the first failure, and that status covers the whole message
         BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), readRegisterResult);
         offset += 2;
 
@@ -471,8 +492,6 @@ internal class GVCPServer
         offset += 2;
 
         // length (2 bytes) (only payload)
-        // if not success, length will be 0
-        ushort length = (readRegisterResult == GVCPStatus.GEV_STATUS_SUCCESS) ? (ushort)(4 * addresses.Length) : (ushort)0;
         BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), length);
         offset += 2;
 
@@ -551,8 +570,9 @@ internal class GVCPServer
         offset += 2;
 
         // length (2 bytes) (only payload): (reserved + index = 4 bytes)
-        ushort length = (status == GVCPStatus.GEV_STATUS_SUCCESS) ? (ushort)4 : (ushort)0;
-        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), length);
+        // always 4, including on failure: the index field is how the client finds
+        // out which register failed
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), (ushort)4);
         offset += 2;
 
         // ack_id (2 bytes)
@@ -613,7 +633,7 @@ internal class GVCPServer
         // ------------------------------------------ payload
 
         // first we'll actually write the data to device
-        ushort status = _deviceState.WriteMemory(sender, address, data);
+        ushort status = _deviceState.WriteMemory(sender, address, data, out int index);
 
         // reserved (2 bytes)
         // spec says set 0 on transmission, ignore on reception.
@@ -622,10 +642,9 @@ internal class GVCPServer
         offset += 2;
 
         // index (2 bytes)
-        // number of bytes written successfully. the write is all-or-nothing, so
-        // it's either everything or nothing at all
-        ushort written = (status == GVCPStatus.GEV_STATUS_SUCCESS) ? (ushort)data.Length : (ushort)0;
-        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), written);
+        // on success the number of bytes written, on failure the offset of the
+        // byte where the write stopped
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), (ushort)index);
 
         // ------------------------------------------ header
 
@@ -641,8 +660,8 @@ internal class GVCPServer
         offset += 2;
 
         // length (2 bytes) (only payload): (reserved + index = 4 bytes)
-        ushort length = (status == GVCPStatus.GEV_STATUS_SUCCESS) ? (ushort)4 : (ushort)0;
-        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), length);
+        // always 4, the index field has to reach the client even on failure
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), (ushort)4);
         offset += 2;
 
         // ack_id (2 bytes)

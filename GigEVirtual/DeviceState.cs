@@ -168,8 +168,10 @@ internal class DeviceState
 
         // gvcp capability
         uint gvcpCapability =
-            Pack(1, specBitStart: 0, width: 1) | // user_defined_name supported
-            Pack(1, specBitStart: 1, width: 1);  // serial_number supported
+            Pack(1, specBitStart: 0, width: 1) |  // user_defined_name supported
+            Pack(1, specBitStart: 1, width: 1) |  // serial_number supported
+            Pack(1, specBitStart: 30, width: 1) | // WRITEMEM supported
+            Pack(1, specBitStart: 31, width: 1);  // concatenation supported
         DefineUint(0x0934, RegAccess.ReadOnly, gvcpCapability);
 
         // heartbeat timeout
@@ -353,10 +355,16 @@ internal class DeviceState
         }
     }
 
-    public ushort WriteMemory(IPEndPoint sender, uint address, byte[] value)
+    // index reports what the ack needs: on success the number of bytes written,
+    // on failure the byte offset where the write stopped. the spec has writes
+    // before that point stand, so this applies register by register rather than
+    // all at once.
+    public ushort WriteMemory(IPEndPoint sender, uint address, byte[] value, out int index)
     {
         lock (_registersLock)
         {
+            index = 0;
+
             if (address % 4 != 0 || value.Length % 4 != 0)
                 return GVCPStatus.GEV_STATUS_BAD_ALIGNMENT;
 
@@ -371,31 +379,30 @@ internal class DeviceState
 
             foreach (Register register in covered)
             {
+                index = (int)(register.Address - address);
+                int length = Math.Min(register.Length, value.Length - index);
+                byte[] slice = value[index..(index + length)];
+
                 if (register.Access == RegAccess.ReadOnly)
                     return GVCPStatus.GEV_STATUS_WRITE_PROTECT;
 
                 if (register.NeedsControl && !Equals(_primaryController, sender))
                     return GVCPStatus.GEV_STATUS_ACCESS_DENIED;
-            }
 
-            // hooks run first so they can reject the value before anything is stored
-            foreach (Register register in covered)
-            {
-                if (register.OnWrite is null) continue;
+                // the hook runs first so it can reject the value before it is stored
+                if (register.OnWrite is not null)
+                {
+                    ushort status = register.OnWrite(sender, slice);
+                    if (status != GVCPStatus.GEV_STATUS_SUCCESS) return status;
+                }
 
-                int start = (int)(register.Address - address);
-                int length = Math.Min(register.Length, value.Length - start);
+                Array.Copy(slice, 0, _memory, (int)register.Address, length);
 
-                ushort status = register.OnWrite(sender, value[start..(start + length)]);
-                if (status != GVCPStatus.GEV_STATUS_SUCCESS) return status;
-            }
-
-            Array.Copy(value, 0, _memory, (int)address, value.Length);
-
-            foreach (Register register in covered)
                 if (register.SelfClearing)
                     Array.Clear(_memory, (int)register.Address, register.Length);
+            }
 
+            index = value.Length;
             return GVCPStatus.GEV_STATUS_SUCCESS;
         }
     }
@@ -407,7 +414,7 @@ internal class DeviceState
 
     public ushort WriteRegister(IPEndPoint sender, uint address, byte[] value)
     {
-        return WriteMemory(sender, address, value);
+        return WriteMemory(sender, address, value, out _);
     }
 
     // resolved from gvcp server, so server must set to device...
@@ -446,7 +453,10 @@ internal class DeviceState
 
     private ushort HandleCCPWrite(IPEndPoint sender, byte[] value)
     {
-        uint requested = ReadU32(value);
+        // control lives in bit 30 (control_access) and bit 31 (exclusive_access)
+        // in spec numbering, so the low two bits of the value. bits 0-15 carry the
+        // switchover key, which does not claim anything on its own.
+        uint requested = ReadU32(value) & 0x3;
 
         if (requested == 0)
         {
