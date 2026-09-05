@@ -271,7 +271,7 @@ public class GenICamXmlTests
     [Fact]
     public void ALittleEndianRegisterReadsBackTheWayItStoresIts()
     {
-        var state = new DeviceState();
+        var state = TestDevice.Bare();
         IPEndPoint controller = new(IPAddress.Parse("192.168.1.10"), 50000);
         state.WriteRegister(controller, 0x0A00, [0, 0, 0, 2]);
 
@@ -296,7 +296,7 @@ public class GenICamXmlTests
     [Fact]
     public void ABigEndianBootstrapRegisterIsUnaffected()
     {
-        var state = new DeviceState();
+        var state = TestDevice.Bare();
 
         // spec version, which we define big-endian
         Assert.Equal(0x00020002u, state.ReadUint(0x0000));
@@ -307,7 +307,7 @@ public class GenICamXmlTests
     [Fact]
     public void DefiningFromXmlLeavesExistingRegistersAlone()
     {
-        var state = new DeviceState();
+        var state = TestDevice.Bare();
 
         // 0x0000 is the version register, which we define ourselves with a value.
         // a description declaring the same address must not blank it.
@@ -332,7 +332,7 @@ public class GenICamXmlTests
     [Fact]
     public void RegistersFromXmlAreReachableAndWritable()
     {
-        var state = new DeviceState();
+        var state = TestDevice.Bare();
         IPEndPoint controller = new(IPAddress.Parse("192.168.1.10"), 50000);
         state.WriteRegister(controller, 0x0A00, [0, 0, 0, 2]); // take control
 
@@ -353,7 +353,7 @@ public class GenICamXmlTests
     [Fact]
     public void AReadOnlyRegisterFromXmlIsWriteProtected()
     {
-        var state = new DeviceState();
+        var state = TestDevice.Bare();
         IPEndPoint controller = new(IPAddress.Parse("192.168.1.10"), 50000);
         state.WriteRegister(controller, 0x0A00, [0, 0, 0, 2]);
 
@@ -371,7 +371,7 @@ public class GenICamXmlTests
     [Fact]
     public void GapsBetweenXmlRegistersStillDoNotExist()
     {
-        var state = new DeviceState();
+        var state = TestDevice.Bare();
 
         state.DefineFromXml(Xml("""
             <IntReg Name="A">

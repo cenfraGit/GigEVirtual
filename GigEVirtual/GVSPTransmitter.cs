@@ -11,6 +11,15 @@ using System.Net.Sockets;
 
 namespace GigEVirtual;
 
+// where a device keeps what the transmitter needs to know. delegates rather than
+// addresses, because a device is free to place these registers anywhere, store
+// them in either byte order, and hold the frame rate as whatever type suits it.
+internal record StreamGeometry(
+    Func<int> Width,
+    Func<int> Height,
+    Func<uint> PixelFormat,
+    Func<float> FrameRate);
+
 internal class GVSPTransmitter
 {
     // --------------------------------------------------------------- fields and properties
@@ -41,14 +50,17 @@ internal class GVSPTransmitter
     private const int gvspHeaderSize = 20;
 
     private ImageSource _imageSource;
+    private StreamGeometry _geometry;
 
     // --------------------------------------------------------------- constructors
 
-    public GVSPTransmitter(DeviceState deviceState, IPAddress bindAddress, ImageSource imageSource)
+    public GVSPTransmitter(DeviceState deviceState, IPAddress bindAddress,
+                           ImageSource imageSource, StreamGeometry geometry)
     {
         _deviceState = deviceState;
         _bindAddress = bindAddress;
         _imageSource = imageSource;
+        _geometry = geometry;
     }
 
     // --------------------------------------------------------------- methods
@@ -86,17 +98,11 @@ internal class GVSPTransmitter
         long delayNanoseconds = BinaryPrimitives.ReadUInt32BigEndian(scpd0);
         _packetDelayTicks = delayNanoseconds * Stopwatch.Frequency / 1_000_000_000;
 
-        // width
-        _deviceState.ReadRegister(0xA000, out byte[]? widthOut);
-        _width = BinaryPrimitives.ReadInt32BigEndian(widthOut);
-
-        // height
-        _deviceState.ReadRegister(0xA004, out byte[]? heightOut);
-        _height = BinaryPrimitives.ReadInt32BigEndian(heightOut);
-
-        // pixel format
-        _deviceState.ReadRegister(0xA008, out byte[]? pixelFormatOut);
-        _pixelFormat = BinaryPrimitives.ReadUInt32BigEndian(pixelFormatOut);
+        // geometry is fixed for the run: an application cannot change the shape
+        // of a transfer that is already going
+        _width = _geometry.Width();
+        _height = _geometry.Height();
+        _pixelFormat = _geometry.PixelFormat();
 
         // udp connection
         _udpClient = new(new IPEndPoint(_bindAddress, 0));
@@ -258,8 +264,7 @@ internal class GVSPTransmitter
             _block_id++;
 
             // read every block, so an application can change it while streaming
-            _deviceState.ReadRegister(0xA018, out byte[]? frameRateOut);
-            float frameRate = BinaryPrimitives.ReadSingleBigEndian(frameRateOut);
+            float frameRate = _geometry.FrameRate();
 
             nextBlockAt += (long)(Stopwatch.Frequency / frameRate);
 

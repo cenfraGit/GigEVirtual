@@ -26,8 +26,9 @@ public class GVSPTransmitterTests : IDisposable
         _receiver = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
         int port = ((IPEndPoint)_receiver.Client.LocalEndPoint!).Port;
 
-        _state = new DeviceState();
-        _transmitter = new GVSPTransmitter(_state, IPAddress.Loopback, new ImageSource());
+        _state = TestDevice.Camera();
+        _transmitter = new GVSPTransmitter(_state, IPAddress.Loopback, new ImageSource(),
+                                          GigECamera.Geometry(_state));
 
         Write(0x0A00, 2);              // take control
         Write(0x0D18, 0x7F000001);     // SCDA0, 127.0.0.1

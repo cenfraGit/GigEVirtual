@@ -102,17 +102,26 @@ internal class DeviceState
     // set by the device, so we can tell whether a transfer is in progress
     private Func<bool>? _isStreaming;
 
+    // set by the device: what it is currently configured to send. the payload
+    // registers are bootstrap, but what belongs in them depends on geometry
+    // registers the device owns and places wherever it likes.
+    private Func<(uint Width, uint Height, uint PixelFormat)>? _geometry;
+
     // the packet sizes we can actually serve. a request outside this gets
     // rounded rather than refused
     private const uint MinPacketSize = 576;
     private const uint MaxPacketSize = 16384;
 
-    private const float MinFrameRate = 0.1f;
-    private const float MaxFrameRate = 1000.0f;
 
     // --------------------------------------------------------------- constructors
 
-    public DeviceState(string manufacturerName = "cenfra",
+    // xmlContent is the device description this device serves, xmlFileName the
+    // name an application sees in the first url, and xmlAddress where the blob
+    // sits in the register map.
+    public DeviceState(string xmlContent,
+                       string xmlFileName,
+                       uint xmlAddress,
+                       string manufacturerName = "cenfra",
                        string modelName = "modelVirtual",
                        string deviceVersion = "1.0",
                        string manufacturerInfo = "C# cam",
@@ -188,10 +197,8 @@ internal class DeviceState
         DefineString(0x00E8, 16, RegAccess.ReadWrite, deviceName); // "virtualDev"
 
         // first url and xml
-        string xmlContent = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "GigEVirtual.xml"));
         int xmlLength = Encoding.ASCII.GetBytes(xmlContent).Length;
-        uint xmlAddress = 0xA200;
-        string firstUrl = $"Local:GigEVirtual.xml;{xmlAddress:x};{xmlLength:x}";
+        string firstUrl = $"Local:{xmlFileName};{xmlAddress:x};{xmlLength:x}";
 
         DefineString(xmlAddress, xmlLength, RegAccess.ReadOnly, xmlContent);
         DefineString(0x0200, 512, RegAccess.ReadOnly, firstUrl);
@@ -283,9 +290,13 @@ internal class DeviceState
             // the register has to show what the application will actually get
             uint granted = Math.Clamp(requested, MinPacketSize, MaxPacketSize);
 
-            ushort status = UpdatePayloadSize(
-                PeekUint(0xA000), PeekUint(0xA004), PeekUint(0xA008), granted);
-            if (status != GVCPStatus.GEV_STATUS_SUCCESS) return status;
+            if (_geometry is not null)
+            {
+                (uint width, uint height, uint pixelFormat) = _geometry();
+
+                ushort status = UpdatePayloadSize(width, height, pixelFormat, granted);
+                if (status != GVCPStatus.GEV_STATUS_SUCCESS) return status;
+            }
 
             // fire_test_packet is bit 0 in spec numbering and self-clears, so
             // write back the granted size without it
@@ -315,35 +326,6 @@ internal class DeviceState
         // stream channel extended bootstrap address 0 (sceba0)
         DefineUint(0x0D3C, RegAccess.ReadOnly, 0);
 
-        // manufacturer-values
-        DefineUint(0xA000, RegAccess.ReadWrite, 640).OnWrite = (_, v) => // width
-            UpdatePayloadSize(ReadU32(v), PeekUint(0xA004), PeekUint(0xA008), PeekUint(0x0D04) & 0xFFFF);
-
-        DefineUint(0xA004, RegAccess.ReadWrite, 480).OnWrite = (_, v) => // height
-            UpdatePayloadSize(PeekUint(0xA000), ReadU32(v), PeekUint(0xA008), PeekUint(0x0D04) & 0xFFFF);
-
-        DefineUint(0xA008, RegAccess.ReadWrite, GVSPPixelFormats.Mono8).OnWrite = (_, v) => // pixel format
-            UpdatePayloadSize(PeekUint(0xA000), PeekUint(0xA004), ReadU32(v), PeekUint(0x0D04) & 0xFFFF);
-
-        // acquisition start/stop
-        DefineUint(0xA00C, RegAccess.ReadWrite, 0, selfClearing: true);
-        DefineUint(0xA010, RegAccess.ReadWrite, 0, selfClearing: true);
-
-        DefineUint(0xA014, RegAccess.ReadWrite, 0); // acquisition mode (0 = continuous)
-
-        // frames per second. a float because that is how cameras expose it, and
-        // the transmitter re-reads it every block so it can change mid-stream
-        DefineFloat(0xA018, RegAccess.ReadWrite, 10.0f).OnWrite = (_, v) =>
-        {
-            float rate = BinaryPrimitives.ReadSingleBigEndian(v);
-
-            return float.IsFinite(rate) && rate >= MinFrameRate && rate <= MaxFrameRate
-                ? GVCPStatus.GEV_STATUS_SUCCESS
-                : GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
-        };
-
-        // seed the payload registers from the defaults above
-        UpdatePayloadSize(640, 480, GVSPPixelFormats.Mono8, packetSize);
     }
 
     // --------------------------------------------------------------- register map
@@ -366,18 +348,32 @@ internal class DeviceState
         return register;
     }
 
-    private Register DefineUint(uint address, RegAccess access, uint value,
-                                bool needsControl = true, bool selfClearing = false)
+    // a device defines its own feature registers through these. everything the
+    // bootstrap needs is already here by the time it gets a chance.
+    public Register DefineUint(uint address, RegAccess access, uint value,
+                               bool needsControl = true, bool selfClearing = false,
+                               Func<IPEndPoint, byte[], ushort>? onWrite = null)
     {
         Register register = Define(address, 4, access, needsControl, selfClearing);
+        register.OnWrite = onWrite;
         PokeUint(address, value);
         return register;
     }
 
-    private Register DefineFloat(uint address, RegAccess access, float value)
+    public Register DefineFloat(uint address, RegAccess access, float value,
+                                Func<IPEndPoint, byte[], ushort>? onWrite = null)
     {
         Register register = Define(address, 4, access, needsControl: true, selfClearing: false);
+        register.OnWrite = onWrite;
         BinaryPrimitives.WriteSingleBigEndian(register.Data, value);
+        return register;
+    }
+
+    public Register DefineString(uint address, int length, RegAccess access, string value,
+                                 Func<IPEndPoint, byte[], ushort>? onWrite)
+    {
+        Register register = DefineString(address, length, access, value);
+        register.OnWrite = onWrite;
         return register;
     }
 
@@ -561,6 +557,13 @@ internal class DeviceState
         lock (_registersLock) return PeekUint(address);
     }
 
+    // float registers are always big-endian in the descriptions we serve. a
+    // device that stores one the other way round can read the bytes itself.
+    public float ReadFloat(uint address)
+    {
+        lock (_registersLock) return BinaryPrimitives.ReadSingleBigEndian(Bytes(address, 4));
+    }
+
     public ushort ReadMemory(uint address, ushort count, out byte[]? value)
     {
         // we'll lock the whole method so alignment/bounds don't change,
@@ -685,7 +688,9 @@ internal class DeviceState
     // packet size changes, since the client sizes its buffers from these
     private ushort UpdatePayloadSize(uint width, uint height, uint pixelFormat, uint packetSize)
     {
-        if (width < 64 || width % 4 != 0 || height < 1)
+        // a device enforces its own minimum, increment and maximum. all this
+        // needs is enough to do the arithmetic below.
+        if (width == 0 || height == 0)
             return GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
 
         PixelFormat? format = GVSPPixelFormats.Find(pixelFormat);
@@ -778,6 +783,18 @@ internal class DeviceState
     public void OnFireTestPacket(Func<int, ushort> hook) => _fireTestPacket = hook;
 
     public void StreamingCheck(Func<bool> check) => _isStreaming = check;
+
+    public void GeometrySource(Func<(uint Width, uint Height, uint PixelFormat)> source) =>
+        _geometry = source;
+
+    // recomputes SCMBS0 and SCMPC0. a device calls this from its own geometry
+    // hooks, passing the value being written rather than the one still stored,
+    // since hooks run before the write lands.
+    public ushort RecomputePayload(uint width, uint height, uint pixelFormat)
+    {
+        lock (_registersLock)
+            return UpdatePayloadSize(width, height, pixelFormat, PeekUint(0x0D04) & 0xFFFF);
+    }
 
     // free-running counter in the units the tick frequency register reports
     // we fix that at 1 GHz, so a tick is a nanosecond
