@@ -38,6 +38,7 @@
 		<pFeature>AcquisitionMode</pFeature>
 		<pFeature>AcquisitionStart</pFeature>
 		<pFeature>AcquisitionStop</pFeature>
+		<pFeature>AcquisitionFrameRate</pFeature>
 	</Category>
 
 	<Integer Name="Width" NameSpace="Standard">
@@ -207,6 +208,24 @@
 		<Sign>Unsigned</Sign>
 		<Endianess>BigEndian</Endianess>
 	</IntReg>
+
+	<Float Name="AcquisitionFrameRate" NameSpace="Standard">
+		<Description>Rate at which frames are captured, in Hz.</Description>
+		<Visibility>Beginner</Visibility>
+		<pValue>AcquisitionFrameRateReg</pValue>
+		<Min>0.1</Min>
+		<Max>1000.0</Max>
+		<Unit>Hz</Unit>
+	</Float>
+
+	<FloatReg Name="AcquisitionFrameRateReg">
+		<Visibility>Invisible</Visibility>
+		<Address>0xA018</Address>
+		<Length>4</Length>
+		<AccessMode>RW</AccessMode>
+		<pPort>Device</pPort>
+		<Endianess>BigEndian</Endianess>
+	</FloatReg>
 
 	<IntReg Name="PayloadSizeVal">
 		<Description>Payload size in bytes, as computed by the device.</Description>

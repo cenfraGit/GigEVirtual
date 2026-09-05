@@ -86,6 +86,9 @@ internal class DeviceState
     private const uint MinPacketSize = 576;
     private const uint MaxPacketSize = 16384;
 
+    private const float MinFrameRate = 0.1f;
+    private const float MaxFrameRate = 1000.0f;
+
     // --------------------------------------------------------------- constructors
 
     public DeviceState(string manufacturerName = "cenfra",
@@ -305,6 +308,17 @@ internal class DeviceState
 
         DefineUint(0xA014, RegAccess.ReadWrite, 0); // acquisition mode (0 = continuous)
 
+        // frames per second. a float because that is how cameras expose it, and
+        // the transmitter re-reads it every block so it can change mid-stream
+        DefineFloat(0xA018, RegAccess.ReadWrite, 10.0f).OnWrite = (_, v) =>
+        {
+            float rate = BinaryPrimitives.ReadSingleBigEndian(v);
+
+            return float.IsFinite(rate) && rate >= MinFrameRate && rate <= MaxFrameRate
+                ? GVCPStatus.GEV_STATUS_SUCCESS
+                : GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
+        };
+
         // seed the payload registers from the defaults above
         UpdatePayloadSize(640, 480, GVSPPixelFormats.Mono8, packetSize);
     }
@@ -332,6 +346,13 @@ internal class DeviceState
     {
         Register register = Define(address, 4, access, needsControl, selfClearing);
         PokeUint(address, value);
+        return register;
+    }
+
+    private Register DefineFloat(uint address, RegAccess access, float value)
+    {
+        Register register = Define(address, 4, access, needsControl: true, selfClearing: false);
+        BinaryPrimitives.WriteSingleBigEndian(_memory.AsSpan((int)address, 4), value);
         return register;
     }
 

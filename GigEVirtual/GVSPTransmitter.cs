@@ -191,6 +191,11 @@ internal class GVSPTransmitter
         // reset blockId
         _block_id = 1;
 
+        // when the next block is due. advancing this by the frame interval,
+        // rather than sleeping a fixed amount after each block, keeps the frame
+        // rate honest instead of letting the send time drift it slower.
+        long nextBlockAt = Stopwatch.GetTimestamp();
+
         while (!ct.IsCancellationRequested)
         {
             // packet_id is reset at the start of each block
@@ -225,7 +230,17 @@ internal class GVSPTransmitter
             // increment for next block
             _block_id++;
 
-            await Task.Delay(800);
+            // read every block, so an application can change it while streaming
+            _deviceState.ReadRegister(0xA018, out byte[]? frameRateOut);
+            float frameRate = BinaryPrimitives.ReadSingleBigEndian(frameRateOut);
+
+            nextBlockAt += (long)(Stopwatch.Frequency / frameRate);
+
+            long remaining = nextBlockAt - Stopwatch.GetTimestamp();
+            if (remaining > 0)
+                await Task.Delay(TimeSpan.FromSeconds((double)remaining / Stopwatch.Frequency), ct);
+            else
+                nextBlockAt = Stopwatch.GetTimestamp(); // fell behind, start again from now
         }
     }
 

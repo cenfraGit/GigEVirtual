@@ -622,6 +622,53 @@ public class DeviceStateTests
         Assert.Equal(16384u, PacketSize(state));
     }
 
+    // --------------------------------------------------------------- frame rate
+
+    private static byte[] F32(float value)
+    {
+        byte[] buffer = new byte[4];
+        BinaryPrimitives.WriteSingleBigEndian(buffer, value);
+        return buffer;
+    }
+
+    private static float FrameRate(DeviceState state)
+    {
+        state.ReadRegister(0xA018, out byte[]? value);
+        return BinaryPrimitives.ReadSingleBigEndian(value!);
+    }
+
+    [Fact]
+    public void FrameRateHasAUsableDefault()
+    {
+        Assert.Equal(10.0f, FrameRate(new DeviceState()));
+    }
+
+    [Fact]
+    public void FrameRateCanBeChanged()
+    {
+        DeviceState state = Controlled();
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0xA018, F32(30.0f)));
+        Assert.Equal(30.0f, FrameRate(state));
+    }
+
+    [Theory]
+    [InlineData(0.0f)]
+    [InlineData(-5.0f)]
+    [InlineData(5000.0f)]
+    [InlineData(float.NaN)]
+    [InlineData(float.PositiveInfinity)]
+    public void ImplausibleFrameRatesAreRejected(float rate)
+    {
+        DeviceState state = Controlled();
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_PARAMETER,
+            state.WriteRegister(Controller, 0xA018, F32(rate)));
+
+        // and the old value survives
+        Assert.Equal(10.0f, FrameRate(state));
+    }
+
     // --------------------------------------------------------------- test packet
 
     // fire_test_packet is bit 0 and do_not_fragment is bit 1, in spec numbering
