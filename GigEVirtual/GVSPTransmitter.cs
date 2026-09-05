@@ -29,14 +29,15 @@ internal class GVSPTransmitter
 
     private const int gvspHeaderSize = 20;
 
-    private byte[] _testImage;
+    private ImageSource _imageSource;
 
     // --------------------------------------------------------------- constructors
 
-    public GVSPTransmitter(DeviceState deviceState, IPAddress bindAddress)
+    public GVSPTransmitter(DeviceState deviceState, IPAddress bindAddress, ImageSource imageSource)
     {
         _deviceState = deviceState;
         _bindAddress = bindAddress;
+        _imageSource = imageSource;
     }
 
     // --------------------------------------------------------------- methods
@@ -77,15 +78,6 @@ internal class GVSPTransmitter
         // pixel format
         _deviceState.ReadRegister(0xA008, out byte[]? pixelFormatOut);
         _pixelFormat = BinaryPrimitives.ReadUInt32BigEndian(pixelFormatOut);
-
-        // create temp image (for mono8)
-        _testImage = new byte[_width * _height * 1];
-        for (int i = 0; i < _testImage.Length; i++)
-        {
-            int x = i % _width;
-            int y = i / _width;
-            _testImage[i] = ((x + y) % 2 == 0) ? (byte)255 : (byte)0;
-        }
 
         // udp connection
         _udpClient = new(new IPEndPoint(_bindAddress, 0));
@@ -136,6 +128,9 @@ internal class GVSPTransmitter
             // packet_id is reset at the start of each block
             _packet_id = 0;
 
+            // one frame per block
+            byte[] frame = _imageSource.NextFrame(_width, _height);
+
             // build leader
             byte[] leader = BuildDataLeader();
             _udpClient?.Send(leader);
@@ -144,13 +139,12 @@ internal class GVSPTransmitter
             // spec says for data payload packets, the packet size
             // is IP header + UDP header + GVSP header
             int usablePayloadPerPacket = _packetSize - 20 - 8 - gvspHeaderSize;
-            int image_byte_amount = _width * _height * 1;
             byte[] payload;
 
-            for (int i = 0; i < image_byte_amount; i += usablePayloadPerPacket)
+            for (int i = 0; i < frame.Length; i += usablePayloadPerPacket)
             {
-                int chunkSize = Math.Min(usablePayloadPerPacket, image_byte_amount - i);
-                payload = BuildDataPayload(i, chunkSize);
+                int chunkSize = Math.Min(usablePayloadPerPacket, frame.Length - i);
+                payload = BuildDataPayload(frame, i, chunkSize);
                 _udpClient?.Send(payload);
             }
 
@@ -162,11 +156,6 @@ internal class GVSPTransmitter
             _block_id++;
 
             await Task.Delay(800);
-
-            // flip image
-            Span<byte> span = _testImage;
-            for (int i = 0; i < span.Length; i++)
-                span[i] = (byte)~span[i];
         }
     }
 
@@ -272,10 +261,10 @@ internal class GVSPTransmitter
         return leader;
     }
 
-    private byte[] BuildDataPayload(int imageOffset, int chunkSize)
+    private byte[] BuildDataPayload(byte[] frame, int imageOffset, int chunkSize)
     {
         byte[] payload = new byte[gvspHeaderSize + chunkSize];
-        Array.Copy(_testImage, imageOffset, payload, gvspHeaderSize, chunkSize);
+        Array.Copy(frame, imageOffset, payload, gvspHeaderSize, chunkSize);
         // copy header
         byte[] header = BuildGVSPHeader(3);
         Array.Copy(header, 0, payload, 0, gvspHeaderSize);

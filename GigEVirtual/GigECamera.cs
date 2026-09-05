@@ -21,10 +21,11 @@ public class GigECamera
                       string manufacturerInfo = "C# cam",
                       string serialNumber = "S0001",
                       string deviceName = "virtualCam",
-                      bool shareToNetwork = false)
+                      bool shareToNetwork = false,
+                      string? imagePath = null)
     {
         _deviceState = new(manufacturerName, modelName, deviceVersion, manufacturerInfo, serialNumber, deviceName);
-        _gvspTransmitter = new(_deviceState, IPAddress.Parse(ip));
+        _gvspTransmitter = new(_deviceState, IPAddress.Parse(ip), new ImageSource(imagePath));
         _gvcpServer = new GVCPServer(IPAddress.Parse(ip), _deviceState, shareToNetwork);
 
         _deviceState.OnWrite(0xA00C, (_, _) => _gvspTransmitter.StartAcquisition());
