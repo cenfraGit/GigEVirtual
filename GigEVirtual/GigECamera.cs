@@ -36,6 +36,9 @@ public class GigECamera
 
         // an application probes the mtu by asking for test packets through SCPS0
         _deviceState.OnFireTestPacket(_gvspTransmitter.SendTestPacket);
+
+        // the stream channel registers are locked while a transfer is running
+        _deviceState.StreamingCheck(() => _gvspTransmitter.IsStreaming);
     }
 
     public Task Start()

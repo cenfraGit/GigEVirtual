@@ -17,6 +17,12 @@ internal class GVSPTransmitter
 
     private CancellationTokenSource? _cts = null;
 
+    // held around every send and around disposing the socket, so stopping can
+    // never pull the socket out from under a send in progress. waiting for the
+    // streaming task instead would deadlock: stopping runs inside a register
+    // write, holding the lock that the streaming task needs to read the frame rate.
+    private readonly object _sendLock = new();
+
     private DeviceState _deviceState;
     private IPAddress _bindAddress;
     private UdpClient? _udpClient;
@@ -175,15 +181,36 @@ internal class GVSPTransmitter
         }
     }
 
+    public bool IsStreaming => _cts is not null;
+
     public ushort StopAcquisition()
     {
         _cts?.Cancel();
         _cts = null;
-        _udpClient?.Dispose();
-        _udpClient = null;
+
+        lock (_sendLock)
+        {
+            _udpClient?.Dispose();
+            _udpClient = null;
+        }
 
         // stopping while not streaming is not an error
         return GVCPStatus.GEV_STATUS_SUCCESS;
+    }
+
+    // returns false once this run is over, which is the streaming task's cue to
+    // stop part way through a block. the token matters as much as the socket: a
+    // task that has not noticed cancellation yet would otherwise wake up after a
+    // restart and push a stale block into the new stream.
+    private bool Send(byte[] packet, CancellationToken ct)
+    {
+        lock (_sendLock)
+        {
+            if (ct.IsCancellationRequested || _udpClient is null) return false;
+
+            _udpClient.Send(packet);
+            return true;
+        }
     }
 
     private async Task Stream(CancellationToken ct)
@@ -206,7 +233,7 @@ internal class GVSPTransmitter
 
             // build leader
             byte[] leader = BuildDataLeader();
-            _udpClient?.Send(leader);
+            if (!Send(leader, ct)) return;
             Pace();
 
             // build data payload
@@ -219,13 +246,13 @@ internal class GVSPTransmitter
             {
                 int chunkSize = Math.Min(usablePayloadPerPacket, frame.Length - i);
                 payload = BuildDataPayload(frame, i, chunkSize);
-                _udpClient?.Send(payload);
+                if (!Send(payload, ct)) return;
                 Pace();
             }
 
             // build trailer
             byte[] trailer = BuildDataTrailer();
-            _udpClient?.Send(trailer);
+            if (!Send(trailer, ct)) return;
 
             // increment for next block
             _block_id++;

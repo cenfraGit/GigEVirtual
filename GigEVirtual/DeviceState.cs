@@ -28,6 +28,11 @@ internal class Register
     // genicam command register. set to 0 again once the write goes through
     public bool SelfClearing;
 
+    // the stream channel registers describe a transfer in progress, so changing
+    // them mid-stream would leave the application decoding against the wrong
+    // shape. spec has these answer BUSY instead.
+    public bool LockedWhileStreaming;
+
     // runs before the value is stored. the bytes it is handed are the ones that
     // get written, so a hook can clamp them in place. returning anything but
     // SUCCESS aborts the write.
@@ -80,6 +85,9 @@ internal class DeviceState
     // set by the device. firing a test packet needs a socket, which is the
     // transmitter's business rather than ours
     private Func<int, ushort>? _fireTestPacket;
+
+    // set by the device, so we can tell whether a transfer is in progress
+    private Func<bool>? _isStreaming;
 
     // the packet sizes we can actually serve. a request outside this gets
     // rounded rather than refused
@@ -251,7 +259,9 @@ internal class DeviceState
         // stream channel packet size 0 (scps0). the low 16 bits are the size,
         // bit 0 asks for a test packet and bit 1 sets the ip don't fragment flag
         uint packetSize = 1500;
-        DefineUint(0x0D04, RegAccess.ReadWrite, packetSize).OnWrite = (_, v) =>
+        Register scps0 = DefineUint(0x0D04, RegAccess.ReadWrite, packetSize);
+        scps0.LockedWhileStreaming = true;
+        scps0.OnWrite = (_, v) =>
         {
             uint value = ReadU32(v);
             uint requested = value & 0xFFFF;
@@ -280,7 +290,7 @@ internal class DeviceState
         DefineUint(0x0D08, RegAccess.ReadWrite, 0);
 
         // stream channel destination address 0 (scda0)
-        DefineUint(0x0D18, RegAccess.ReadWrite, 0);
+        DefineUint(0x0D18, RegAccess.ReadWrite, 0).LockedWhileStreaming = true;
 
         // stream channel max packet count 0 (scmpc0)
         DefineUint(0x0D30, RegAccess.ReadOnly, 0);
@@ -492,6 +502,9 @@ internal class DeviceState
                 if (register.NeedsControl && !Equals(_primaryController, sender))
                     return GVCPStatus.GEV_STATUS_ACCESS_DENIED;
 
+                if (register.LockedWhileStreaming && _isStreaming?.Invoke() == true)
+                    return GVCPStatus.GEV_STATUS_BUSY;
+
                 // the hook runs first so it can reject the value before it is stored
                 if (register.OnWrite is not null)
                 {
@@ -648,6 +661,8 @@ internal class DeviceState
     public void OnControlChannelClosed(Action hook) => _controlChannelClosed = hook;
 
     public void OnFireTestPacket(Func<int, ushort> hook) => _fireTestPacket = hook;
+
+    public void StreamingCheck(Func<bool> check) => _isStreaming = check;
 
     // free-running counter in the units the tick frequency register reports
     // we fix that at 1 GHz, so a tick is a nanosecond

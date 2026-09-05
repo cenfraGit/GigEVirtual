@@ -622,6 +622,54 @@ public class DeviceStateTests
         Assert.Equal(16384u, PacketSize(state));
     }
 
+    // --------------------------------------------------------------- streaming locks
+
+    [Fact]
+    public void StreamChannelRegistersAreLockedWhileStreaming()
+    {
+        DeviceState state = Controlled();
+        state.StreamingCheck(() => true);
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_BUSY, state.WriteRegister(Controller, 0x0D18, U32(0x7F000001)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_BUSY, state.WriteRegister(Controller, 0x0D04, U32(9000)));
+    }
+
+    [Fact]
+    public void StreamChannelPortStaysWritableWhileStreaming()
+    {
+        DeviceState state = Controlled();
+        state.StreamingCheck(() => true);
+
+        // writing 0 to SCP0 is how an application closes the channel, so locking
+        // it would leave no way out
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0D00, U32(0)));
+    }
+
+    [Fact]
+    public void StreamChannelRegistersAreWritableWhenIdle()
+    {
+        DeviceState state = Controlled();
+        state.StreamingCheck(() => false);
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0D18, U32(0x7F000001)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0D04, U32(9000)));
+    }
+
+    [Fact]
+    public void ALockedRegisterDoesNotRunItsHook()
+    {
+        DeviceState state = Controlled();
+        state.StreamingCheck(() => true);
+
+        var fired = new List<int>();
+        state.OnFireTestPacket(size => { fired.Add(size); return GVCPStatus.GEV_STATUS_SUCCESS; });
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_BUSY,
+            state.WriteRegister(Controller, 0x0D04, U32(0x80000000 | 1500)));
+
+        Assert.Empty(fired);
+    }
+
     // --------------------------------------------------------------- frame rate
 
     private static byte[] F32(float value)

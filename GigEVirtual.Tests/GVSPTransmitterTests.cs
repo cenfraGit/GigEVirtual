@@ -210,6 +210,51 @@ public class GVSPTransmitterTests : IDisposable
     // --------------------------------------------------------------- stream channel
 
     [Fact]
+    public void StoppingEndsTheStream()
+    {
+        WriteFloat(0xA018, 50.0f);
+        _transmitter.StartAcquisition();
+
+        Assert.NotEmpty(Collect(TimeSpan.FromMilliseconds(300)));
+
+        _transmitter.StopAcquisition();
+        Collect(TimeSpan.FromMilliseconds(200)); // drain anything already in flight
+
+        Assert.Empty(Collect(TimeSpan.FromMilliseconds(300)));
+    }
+
+    [Fact]
+    public void StartingAndStoppingRepeatedlyStaysHealthy()
+    {
+        // stopping disposes the socket while the streaming task may be mid-send,
+        // so hammer that boundary
+        for (int i = 0; i < 20; i++)
+        {
+            Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, _transmitter.StartAcquisition());
+            Thread.Sleep(5);
+            Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, _transmitter.StopAcquisition());
+        }
+
+        // and it still streams afterwards
+        WriteFloat(0xA018, 50.0f);
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, _transmitter.StartAcquisition());
+
+        Assert.NotEmpty(Collect(TimeSpan.FromMilliseconds(400)));
+    }
+
+    [Fact]
+    public void IsStreamingTracksAcquisition()
+    {
+        Assert.False(_transmitter.IsStreaming);
+
+        _transmitter.StartAcquisition();
+        Assert.True(_transmitter.IsStreaming);
+
+        _transmitter.StopAcquisition();
+        Assert.False(_transmitter.IsStreaming);
+    }
+
+    [Fact]
     public void StartingWithoutADestinationIsRefused()
     {
         Write(0x0D00, 0); // close the stream channel
