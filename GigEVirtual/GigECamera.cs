@@ -29,6 +29,9 @@ public class GigECamera
 
         _deviceState.OnWrite(0xA00C, (_, _) => _gvspTransmitter.StartAcquisition());
         _deviceState.OnWrite(0xA010, (_, _) => _gvspTransmitter.StopAcquisition());
+
+        // losing the control channel, by release or by heartbeat, aborts streaming
+        _deviceState.OnControlChannelClosed(() => _gvspTransmitter.StopAcquisition());
     }
 
     public Task Start()

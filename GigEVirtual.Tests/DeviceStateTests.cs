@@ -232,6 +232,126 @@ public class DeviceStateTests
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0xA000, U32(320)));
     }
 
+    // --------------------------------------------------------------- heartbeat
+
+    // the shortest timeout the spec allows, so the tests stay quick
+    private const int MinTimeout = 500;
+
+    private static DeviceState ControlledWithShortHeartbeat()
+    {
+        DeviceState state = Controlled();
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS,
+            state.WriteRegister(Controller, 0x0938, U32(MinTimeout)));
+
+        // re-arm so the shortened timeout takes effect
+        state.ResetHeartbeat(Controller);
+        return state;
+    }
+
+    private static uint Ccp(DeviceState state)
+    {
+        state.ReadRegister(0x0A00, out byte[]? value);
+        return ReadU32(value!);
+    }
+
+    [Fact]
+    public void TimeoutBelowFiveHundredIsRaised()
+    {
+        DeviceState state = Controlled();
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0938, U32(100)));
+
+        state.ReadRegister(0x0938, out byte[]? timeout);
+        Assert.Equal(500u, ReadU32(timeout!));
+    }
+
+    [Fact]
+    public void HeartbeatExpiryClosesTheControlChannel()
+    {
+        DeviceState state = ControlledWithShortHeartbeat();
+
+        Thread.Sleep(MinTimeout * 3);
+
+        Assert.Equal(0u, Ccp(state));
+
+        // the device is available again
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Other, 0x0A00, U32(2)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Other, 0xA000, U32(320)));
+    }
+
+    [Fact]
+    public void CommandsFromThePrimaryKeepTheChannelOpen()
+    {
+        DeviceState state = ControlledWithShortHeartbeat();
+
+        // keep it alive well past the timeout
+        for (int i = 0; i < 6; i++)
+        {
+            Thread.Sleep(MinTimeout / 2);
+            state.ResetHeartbeat(Controller);
+        }
+
+        Assert.Equal(2u, Ccp(state));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0xA000, U32(320)));
+    }
+
+    [Fact]
+    public void CommandsFromSecondaryApplicationsDoNotKeepItOpen()
+    {
+        DeviceState state = ControlledWithShortHeartbeat();
+
+        for (int i = 0; i < 6; i++)
+        {
+            Thread.Sleep(MinTimeout / 2);
+            state.ResetHeartbeat(Other);
+        }
+
+        Assert.Equal(0u, Ccp(state));
+    }
+
+    [Fact]
+    public void ClosingTheChannelResetsTheStreamChannelPort()
+    {
+        DeviceState state = Controlled();
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0D00, U32(50010)));
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(0)));
+
+        state.ReadRegister(0x0D00, out byte[]? port);
+        Assert.Equal(0u, ReadU32(port!));
+        Assert.Equal(0u, Ccp(state));
+    }
+
+    [Fact]
+    public void ClosingTheChannelRunsTheHook()
+    {
+        DeviceState state = Controlled();
+
+        int closed = 0;
+        state.OnControlChannelClosed(() => closed++);
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(0)));
+        Assert.Equal(1, closed);
+
+        // already closed, so releasing again must not fire it a second time
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Other, 0x0A00, U32(0)));
+        Assert.Equal(1, closed);
+    }
+
+    [Fact]
+    public void HeartbeatExpiryRunsTheHook()
+    {
+        DeviceState state = ControlledWithShortHeartbeat();
+
+        int closed = 0;
+        state.OnControlChannelClosed(() => closed++);
+
+        Thread.Sleep(MinTimeout * 3);
+
+        Assert.Equal(1, closed);
+    }
+
     // --------------------------------------------------------------- hooks
 
     [Fact]

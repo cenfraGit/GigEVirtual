@@ -27,7 +27,9 @@ internal class Register
     // genicam command register. set to 0 again once the write goes through
     public bool SelfClearing;
 
-    // runs before the value is stored
+    // runs before the value is stored. the bytes it is handed are the ones that
+    // get written, so a hook can clamp them in place. returning anything but
+    // SUCCESS aborts the write.
     public Func<IPEndPoint, byte[], ushort>? OnWrite;
 }
 
@@ -62,6 +64,14 @@ internal class DeviceState
     private object _registersLock = new();
 
     private IPEndPoint? _primaryController;
+
+    // one-shot, re-armed by every command from the primary application. if it
+    // ever fires, the application went away without closing its channel
+    private System.Threading.Timer? _heartbeatTimer;
+
+    // set by the device, so closing the channel can stop streaming without this
+    // class knowing GVSP exists
+    private Action? _controlChannelClosed;
 
     // --------------------------------------------------------------- constructors
 
@@ -174,8 +184,13 @@ internal class DeviceState
             Pack(1, specBitStart: 31, width: 1);  // concatenation supported
         DefineUint(0x0934, RegAccess.ReadOnly, gvcpCapability);
 
-        // heartbeat timeout
-        DefineUint(0x0938, RegAccess.ReadWrite, 0x0BB8); // factory default
+        // heartbeat timeout. spec says a value under 500 ms is raised to 500, and
+        // the register must show the value actually in use
+        DefineUint(0x0938, RegAccess.ReadWrite, 0x0BB8).OnWrite = (_, v) => // factory default 3000
+        {
+            if (ReadU32(v) < 500) BinaryPrimitives.WriteUInt32BigEndian(v, 500);
+            return GVCPStatus.GEV_STATUS_SUCCESS;
+        };
 
         // control channel privilege. writable without control, (how
         // control gets claimed in the first place)
@@ -461,7 +476,7 @@ internal class DeviceState
         if (requested == 0)
         {
             // closing control channel
-            if (Equals(_primaryController, sender)) _primaryController = null;
+            if (Equals(_primaryController, sender)) CloseControlChannel();
             return GVCPStatus.GEV_STATUS_SUCCESS;
         }
 
@@ -469,10 +484,51 @@ internal class DeviceState
         {
             // same app re-requesting is allowed
             _primaryController = sender;
+
+            _heartbeatTimer ??= new System.Threading.Timer(
+                _ => CloseControlChannel(), null, Timeout.Infinite, Timeout.Infinite);
+
+            ResetHeartbeat(sender);
             return GVCPStatus.GEV_STATUS_SUCCESS;
         }
 
         // someone else already has it
         return GVCPStatus.GEV_STATUS_ACCESS_DENIED;
     }
+
+    // spec says any valid command from the primary application resets the heartbeat,
+    // except DISCOVERY, FORCEIP, PACKETRESEND and ACTION. commands from secondary
+    // applications never affect it
+    public void ResetHeartbeat(IPEndPoint sender)
+    {
+        lock (_registersLock)
+        {
+            if (!Equals(_primaryController, sender)) return;
+            _heartbeatTimer?.Change((int)PeekUint(0x0938), Timeout.Infinite);
+        }
+    }
+
+    // runs when the primary application releases the channel, and when the
+    // heartbeat runs out because it went away without releasing it. the hook
+    // stops streaming, so it must not call back into this class.
+    private void CloseControlChannel()
+    {
+        lock (_registersLock)
+        {
+            if (_primaryController is null) return;
+
+            _primaryController = null;
+            _heartbeatTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+
+            // spec: the device resets its connection state and makes itself
+            // available for another application, and its registers have to
+            // represent that new state
+            PokeUint(0x0A00, 0); // CCP
+            PokeUint(0x0D00, 0); // SCP0, the stream channel port
+
+            _controlChannelClosed?.Invoke();
+        }
+    }
+
+    public void OnControlChannelClosed(Action hook) => _controlChannelClosed = hook;
 }

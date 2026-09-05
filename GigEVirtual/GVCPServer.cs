@@ -204,6 +204,13 @@ internal class GVCPServer
                 $"length={length} " +
                 $"req_id={req_id}");
 
+            // spec: a valid command from the primary application resets the
+            // heartbeat. DISCOVERY, FORCEIP, PACKETRESEND and ACTION are excluded,
+            // and none of them are handled by this loop anyway.
+            if (command is GVCPMessages.READREG_CMD or GVCPMessages.WRITEREG_CMD
+                        or GVCPMessages.READMEM_CMD or GVCPMessages.WRITEMEM_CMD)
+                _deviceState.ResetHeartbeat(result.RemoteEndPoint);
+
             // ------------------------------------------ CMD check
 
             // now we'll build the ack depending on the cmd
