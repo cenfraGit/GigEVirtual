@@ -57,3 +57,8 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# vendor device description files. kept out of version control on purpose:
+# they belong to the camera manufacturers, not to this project.
+genie_nano.xml
+devices/
