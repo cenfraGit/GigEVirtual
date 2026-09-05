@@ -41,10 +41,10 @@ internal class GVSPTransmitter
 
     // --------------------------------------------------------------- methods
 
-    public void StartAcquisition()
+    public ushort StartAcquisition()
     {
-        // if already streaming, return
-        if (_cts != null) return;
+        // if already streaming
+        if (_cts != null) return GVCPStatus.GEV_STATUS_BUSY;
 
         // read necessary registers. these should already be set in the device
 
@@ -56,6 +56,10 @@ internal class GVSPTransmitter
         _deviceState.ReadRegister(0x0D00, out byte[]? scp0);
         // host_port is last two bytes
         int port = BinaryPrimitives.ReadUInt16BigEndian(scp0.AsSpan(2, 2));
+
+        // the client has to configure the stream channel before starting
+        if (port == 0 || destinationIP.Equals(IPAddress.Any))
+            return GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
 
         // SCPS0 (packet size)
         _deviceState.ReadRegister(0x0D04, out byte[]? scps0);
@@ -101,14 +105,19 @@ internal class GVSPTransmitter
             if (t.Exception is not null)
                 Console.WriteLine(t.Exception.GetBaseException());
         }, TaskContinuationOptions.OnlyOnFaulted);
+
+        return GVCPStatus.GEV_STATUS_SUCCESS;
     }
 
-    public void StopAcquisition()
+    public ushort StopAcquisition()
     {
         _cts?.Cancel();
         _cts = null;
         _udpClient?.Dispose();
         _udpClient = null;
+
+        // stopping while not streaming is not an error
+        return GVCPStatus.GEV_STATUS_SUCCESS;
     }
 
     private async Task Stream(CancellationToken ct)
