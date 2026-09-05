@@ -23,7 +23,6 @@ internal class GVCPServer
     private readonly IPAddress _bindAddress;
     private DeviceState _deviceState;
     private UdpClient? _udpClient;
-    private GVSPTransmitter _gvspTransmitter;
     bool _shareToNetwork = false;
 
     // shared discovery
@@ -33,11 +32,10 @@ internal class GVCPServer
 
     // --------------------------------------------------------------- constructors
 
-    public GVCPServer(IPAddress bindAddress, DeviceState deviceState, GVSPTransmitter gvspTransmitter, bool shareToNetwork)
+    public GVCPServer(IPAddress bindAddress, DeviceState deviceState, bool shareToNetwork)
     {
         _deviceState = deviceState;
         _bindAddress = bindAddress;
-        _gvspTransmitter = gvspTransmitter;
         _shareToNetwork = shareToNetwork;
 
         lock (_instancesLock)
@@ -278,16 +276,18 @@ internal class GVCPServer
 
                     Console.WriteLine($"[WRITEMEM] addrss to start writing to: {addressToStartWritingTo:X8}");
 
-                    ack = BuildWriteMemAck(req_id, addressToStartWritingTo, dataToWrite);
+                    ack = BuildWriteMemAck(req_id, addressToStartWritingTo, dataToWrite, result.RemoteEndPoint);
                     await _udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
                 default:
-                    // must return GEV_STATUS_NOT_IMPLEMENTED via ack?
-                    ack = null;
+                    // ack ids are the command id with the low bit set (DISCOVERY_CMD
+                    // 0x0002 -> DISCOVERY_ACK 0x0003, and so on)
+                    ack = BuildErrorAck(req_id, (ushort)(command | 1), GVCPStatus.GEV_STATUS_NOT_IMPLEMENTED);
+                    await _udpClient.SendAsync(ack.Buffer, ack.Buffer.Length, result.RemoteEndPoint);
                     break;
             }
 
-            if (ack is not null) PrintAck(ack);
+            PrintAck(ack);
         }
     }
 
@@ -491,7 +491,7 @@ internal class GVCPServer
 
         // ------------------------------------------ payload
 
-        ushort status = GVCPStatus.GEV_STATUS_INVALID_ADDRESS;
+        ushort status = GVCPStatus.GEV_STATUS_SUCCESS;
 
         // each pair is a register_address, then register_data
         uint register_address, register_data;
@@ -501,7 +501,11 @@ internal class GVCPServer
         // different offset for reading from payload
         int offsetForReading = 0;
 
-        for (int i = 0; i < numberOfRegisters; i++)
+        // how far we got. on success that's every register, on failure it's the
+        // index of the one that failed
+        int index = 0;
+
+        for (index = 0; index < numberOfRegisters; index++)
         {
             register_address = BinaryPrimitives.ReadUInt32BigEndian(payload.Slice(offsetForReading, 4));
             offsetForReading += 4;
@@ -511,26 +515,9 @@ internal class GVCPServer
             byte[] buffer = new byte[4];
             BinaryPrimitives.WriteUInt32BigEndian(buffer, register_data);
 
-            if (register_address == 0x0A00)
-            {
-                status = _deviceState.HandleCCPWrite(sender, buffer);
-            }
-            // if the address matches addresses for Start/Stop acqsuitision
-            else if (register_address == 0xA00C)
-            {
-                _gvspTransmitter.StartAcquisition();
-                status = _deviceState.WriteRegister(register_address, new byte[4]); // signal done
-            }
-            else if (register_address == 0xA010)
-            {
-                _gvspTransmitter.StopAcquisition();
-                status = _deviceState.WriteRegister(register_address, new byte[4]); // signal done
-            }
-            else
-            {
-                // now we write the register value to device
-                status = _deviceState.WriteRegister(register_address, buffer);
-            }
+            // the register map decides whether this address exists, whether it's
+            // writable, and what the write does
+            status = _deviceState.WriteRegister(sender, register_address, buffer);
 
             if (status != GVCPStatus.GEV_STATUS_SUCCESS)
             {
@@ -547,10 +534,8 @@ internal class GVCPServer
         // index (2 bytes)
         // spec says on success, index indicates how many written successfully,
         // on failure, indicates the index of the register in the list
-        // where the error occurred....... we'll assume all were successful
-        // TODO: writememory is using Array.Copy, so no direct way of knowing
-        // which one failed?
-        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), (ushort)numberOfRegisters);
+        // where the error occurred
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), (ushort)index);
 
         // ------------------------------------------ header
 
@@ -619,7 +604,7 @@ internal class GVCPServer
         return new Ack(GVCPMessages.READMEM_ACK, status, ack);
     }
 
-    private Ack BuildWriteMemAck(ushort req_id, uint address, byte[] data)
+    private Ack BuildWriteMemAck(ushort req_id, uint address, byte[] data, IPEndPoint sender)
     {
         // header (8 bytes) + address (4 bytes) + (1 byte per data)
         byte[] ack = new byte[8 + 4];
@@ -628,19 +613,7 @@ internal class GVCPServer
         // ------------------------------------------ payload
 
         // first we'll actually write the data to device
-        ushort status = _deviceState.WriteMemory(address, data);
-
-        // if the address matches addresses for Start/Stop acqsuitision
-        if (address == 0xA00C)
-        {
-            _gvspTransmitter.StartAcquisition();
-            status = _deviceState.WriteRegister(address, new byte[4]); // signal done
-        }
-        else if (address == 0xA010)
-        {
-            _gvspTransmitter.StopAcquisition();
-            status = _deviceState.WriteRegister(address, new byte[4]); // signal done
-        }
+        ushort status = _deviceState.WriteMemory(sender, address, data);
 
         // reserved (2 bytes)
         // spec says set 0 on transmission, ignore on reception.
@@ -649,12 +622,10 @@ internal class GVCPServer
         offset += 2;
 
         // index (2 bytes)
-        // spec says on success, index indicates how many written successfully,
-        // on failure, indicates the index of the register in the list
-        // where the error occurred....... we'll assume all were successful
-        // TODO: writememory is using Array.Copy, so no direct way of knowing
-        // which one failed?
-        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), (ushort)data.Length);
+        // number of bytes written successfully. the write is all-or-nothing, so
+        // it's either everything or nothing at all
+        ushort written = (status == GVCPStatus.GEV_STATUS_SUCCESS) ? (ushort)data.Length : (ushort)0;
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(offset, 2), written);
 
         // ------------------------------------------ header
 
@@ -679,6 +650,19 @@ internal class GVCPServer
         //offset += 2;
 
         return new Ack(GVCPMessages.WRITEMEM_ACK, status, ack);
+    }
+
+    // header-only ack, for when there is nothing to report but a status
+    private static Ack BuildErrorAck(ushort req_id, ushort message, ushort status)
+    {
+        byte[] ack = new byte[8];
+
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(0, 2), status);
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(2, 2), message);
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(4, 2), 0); // length
+        BinaryPrimitives.WriteUInt16BigEndian(ack.AsSpan(6, 2), req_id);
+
+        return new Ack(message, status, ack);
     }
 
     // ------------------------------------------------------------ methods
