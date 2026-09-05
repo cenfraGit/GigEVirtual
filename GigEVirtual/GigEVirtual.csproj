@@ -13,4 +13,8 @@
     </None>
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="GigEVirtual.Tests" />
+  </ItemGroup>
+
 </Project>
