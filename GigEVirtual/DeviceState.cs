@@ -115,10 +115,10 @@ internal class DeviceState
 
     // --------------------------------------------------------------- constructors
 
-    // xmlContent is the device description this device serves, xmlFileName the
-    // name an application sees in the first url, and xmlAddress where the blob
-    // sits in the register map.
-    public DeviceState(string xmlContent,
+    // xml is the device description this device serves, byte for byte as the real
+    // camera would. xmlFileName is the name an application sees in the first url,
+    // and xmlAddress is where the blob sits in the register map.
+    public DeviceState(byte[] xml,
                        string xmlFileName,
                        uint xmlAddress,
                        string manufacturerName = "cenfra",
@@ -196,11 +196,12 @@ internal class DeviceState
         // user-defined name
         DefineString(0x00E8, 16, RegAccess.ReadWrite, deviceName); // "virtualDev"
 
-        // first url and xml
-        int xmlLength = Encoding.ASCII.GetBytes(xmlContent).Length;
-        string firstUrl = $"Local:{xmlFileName};{xmlAddress:x};{xmlLength:x}";
+        // first url and xml. the blob goes in as bytes: decoding it to a string
+        // and back would drop the byte order mark and flatten anything outside
+        // ascii, so what we serve would not be the file the camera ships.
+        string firstUrl = $"Local:{xmlFileName};{xmlAddress:x};{xml.Length:x}";
 
-        DefineString(xmlAddress, xmlLength, RegAccess.ReadOnly, xmlContent);
+        DefineBlock(xmlAddress, RegAccess.ReadOnly, xml);
         DefineString(0x0200, 512, RegAccess.ReadOnly, firstUrl);
 
         // second url. we only serve one xml, but applications read this register
@@ -371,6 +372,14 @@ internal class DeviceState
         Register register = Define(address, 4, access, needsControl: true, selfClearing: false);
         register.OnWrite = onWrite;
         BinaryPrimitives.WriteSingleBigEndian(register.Data, value);
+        return register;
+    }
+
+    public Register DefineBlock(uint address, RegAccess access, byte[] value)
+    {
+        Register register = Define(address, value.Length, access,
+                                   needsControl: true, selfClearing: false);
+        value.CopyTo(register.Data, 0);
         return register;
     }
 

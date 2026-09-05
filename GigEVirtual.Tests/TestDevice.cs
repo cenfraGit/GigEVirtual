@@ -57,7 +57,8 @@ internal static class TestDevice
 
     // bootstrap registers only, the way a device with no features of its own
     // would look
-    public static DeviceState Bare() => new(MinimalXml, "test.xml", 0xA200);
+    public static DeviceState Bare() =>
+        new(System.Text.Encoding.UTF8.GetBytes(MinimalXml), "test.xml", 0xA200);
 
     // the virtual camera: bootstrap plus its 0xA000 feature block
     public static DeviceState Camera() => GigECamera.BuildState();

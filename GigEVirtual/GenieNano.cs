@@ -112,7 +112,7 @@ public class GenieNano : GigEDevice
         if (!File.Exists(xmlPath))
             throw new FileNotFoundException($"genie nano device description not found: {xmlPath}");
 
-        string xml = File.ReadAllText(xmlPath);
+        byte[] xml = File.ReadAllBytes(xmlPath);
 
         DeviceState state = new(xml, Path.GetFileName(xmlPath), XmlAddress,
                                 manufacturerName: "Teledyne DALSA",
@@ -127,7 +127,7 @@ public class GenieNano : GigEDevice
 
         // everything else the description declares. this runs second so the
         // registers above keep the hooks and defaults set for them.
-        state.DefineFromXml(xml);
+        state.DefineFromXml(System.Text.Encoding.UTF8.GetString(xml));
 
         state.GeometrySource(() => (state.ReadUint(Width), state.ReadUint(Height),
                                     state.ReadUint(PixelFormat)));

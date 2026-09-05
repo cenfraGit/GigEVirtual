@@ -62,7 +62,7 @@ public class GigECamera : GigEDevice
                                            string serialNumber = "S0001",
                                            string deviceName = "virtualCam")
     {
-        string xml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, XmlFileName));
+        byte[] xml = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, XmlFileName));
 
         DeviceState state = new(xml, XmlFileName, XmlAddress,
                                 manufacturerName, modelName, deviceVersion,
