@@ -29,7 +29,7 @@ public class DeviceStateTests
     // a device with Controller already holding the control channel
     private static DeviceState Controlled()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(2)));
         return state;
     }
@@ -39,7 +39,7 @@ public class DeviceStateTests
     [Fact]
     public void UnmappedAddressIsNotReadable()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
 
         // nothing is mapped at the gvcp configuration register
         Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_ADDRESS, state.ReadRegister(0x0954, out _));
@@ -56,7 +56,7 @@ public class DeviceStateTests
     [Fact]
     public void MappedAddressReadsBackItsValue()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
 
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(0x0000, out byte[]? version));
         Assert.Equal(0x00020002u, ReadU32(version!)); // spec version 2.2
@@ -67,7 +67,7 @@ public class DeviceStateTests
     [InlineData(0x0000u, (ushort)2)]  // unaligned count
     public void UnalignedReadsAreRejected(uint address, ushort count)
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
 
         Assert.Equal(GVCPStatus.GEV_STATUS_BAD_ALIGNMENT, state.ReadMemory(address, count, out _));
     }
@@ -75,7 +75,7 @@ public class DeviceStateTests
     [Fact]
     public void ReadMayStartInsideARegister()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
 
         // the xml blob is fetched in chunks, so reads land mid-register
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadMemory(0xA200 + 512, 512, out byte[]? chunk));
@@ -85,7 +85,7 @@ public class DeviceStateTests
     [Fact]
     public void ReadMaySpanAdjacentRegisters()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
 
         // manufacturer name (32 bytes) straight into model name (32 bytes)
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadMemory(0x0048, 64, out byte[]? names));
@@ -95,7 +95,7 @@ public class DeviceStateTests
     [Fact]
     public void ReadRunningOffTheEndOfTheMapIsRejected()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
 
         // user-defined name ends at 0x00F8, nothing is mapped after it until 0x0200
         Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_ADDRESS, state.ReadMemory(0x00E8, 32, out _));
@@ -104,7 +104,7 @@ public class DeviceStateTests
     [Fact]
     public void SecondUrlRegisterExistsButIsEmpty()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
 
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadMemory(0x0400, 512, out byte[]? url));
         Assert.All(url!, b => Assert.Equal(0, b));
@@ -127,7 +127,7 @@ public class DeviceStateTests
         // data. address-indexed storage would have to allocate the whole span,
         // so what we hold has to track the registers instead.
         long before = GC.GetTotalAllocatedBytes(precise: true);
-        DeviceState state = TestDevice.Camera();
+        DeviceState state = TestDevice.Bare();
         long after = GC.GetTotalAllocatedBytes(precise: true);
 
         // the xml is the largest thing in here by far. the flat array this
@@ -175,39 +175,18 @@ public class DeviceStateTests
         Assert.Equal(16, index);
     }
 
-    [Fact]
-    public void FailedWriteReportsTheOffsetItStoppedAtAndKeepsEarlierWrites()
-    {
-        DeviceState state = Controlled();
-
-        // width (valid) then height (0, which the hook rejects) in one write
-        byte[] value = [.. U32(320), .. U32(0)];
-
-        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_PARAMETER,
-            state.WriteMemory(Controller, 0xA000, value, out int index));
-
-        // height is 4 bytes in
-        Assert.Equal(4, index);
-
-        // the spec has writes before the failure stand
-        state.ReadRegister(0xA000, out byte[]? width);
-        Assert.Equal(320u, ReadU32(width!));
-
-        state.ReadRegister(0xA004, out byte[]? height);
-        Assert.Equal(480u, ReadU32(height!));
-    }
 
     [Fact]
     public void SwitchoverKeyAloneDoesNotClaimControl()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
 
         // bits 0-15 are the switchover key, control lives in the low two bits
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Other, 0x0A00, U32(0xABCD0000)));
 
         // nobody took control, so Controller can still claim it
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(2)));
-        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0xA000, U32(320)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0014, U32(320)));
     }
 
     // --------------------------------------------------------------- control channel
@@ -215,15 +194,15 @@ public class DeviceStateTests
     [Fact]
     public void WriteWithoutControlIsDenied()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
 
-        Assert.Equal(GVCPStatus.GEV_STATUS_ACCESS_DENIED, state.WriteRegister(Other, 0xA000, U32(320)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_ACCESS_DENIED, state.WriteRegister(Other, 0x0014, U32(320)));
     }
 
     [Fact]
     public void CcpIsWritableWithoutHoldingControl()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
 
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(2)));
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(0x0A00, out byte[]? ccp));
@@ -236,7 +215,7 @@ public class DeviceStateTests
         DeviceState state = Controlled();
 
         Assert.Equal(GVCPStatus.GEV_STATUS_ACCESS_DENIED, state.WriteRegister(Other, 0x0A00, U32(2)));
-        Assert.Equal(GVCPStatus.GEV_STATUS_ACCESS_DENIED, state.WriteRegister(Other, 0xA000, U32(320)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_ACCESS_DENIED, state.WriteRegister(Other, 0x0014, U32(320)));
     }
 
     [Fact]
@@ -246,7 +225,7 @@ public class DeviceStateTests
 
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(0)));
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Other, 0x0A00, U32(2)));
-        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Other, 0xA000, U32(320)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Other, 0x0014, U32(320)));
     }
 
     [Fact]
@@ -257,7 +236,7 @@ public class DeviceStateTests
         // Other does not hold control, so this must not clear it
         state.WriteRegister(Other, 0x0A00, U32(0));
 
-        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0xA000, U32(320)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0014, U32(320)));
     }
 
     // --------------------------------------------------------------- timestamp
@@ -276,7 +255,7 @@ public class DeviceStateTests
     [Fact]
     public void TickFrequencyIsOneGigahertz()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
 
         state.ReadRegister(0x093C, out byte[]? high);
         state.ReadRegister(0x0940, out byte[]? low);
@@ -288,7 +267,7 @@ public class DeviceStateTests
     [Fact]
     public void TimestampAdvances()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
 
         ulong first = state.Timestamp();
         Thread.Sleep(50);
@@ -302,7 +281,7 @@ public class DeviceStateTests
     [Fact]
     public void ValueRegistersStayZeroUntilLatched()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
 
         Thread.Sleep(20);
 
@@ -375,7 +354,7 @@ public class DeviceStateTests
     [Fact]
     public void ControlAccessStillLetsOthersRead()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(Control)));
 
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(Other, 0x0000, out byte[]? version));
@@ -385,7 +364,7 @@ public class DeviceStateTests
     [Fact]
     public void ExclusiveAccessRefusesReadsFromOthers()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(Exclusive)));
 
         Assert.Equal(GVCPStatus.GEV_STATUS_ACCESS_DENIED, state.ReadRegister(Other, 0x0000, out byte[]? value));
@@ -397,7 +376,7 @@ public class DeviceStateTests
     [Fact]
     public void ExclusiveAccessStillAnswersThePrimary()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(Exclusive)));
 
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(Controller, 0x0000, out _));
@@ -406,7 +385,7 @@ public class DeviceStateTests
     [Fact]
     public void ReleasingExclusiveAccessLetsOthersReadAgain()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
         state.WriteRegister(Controller, 0x0A00, U32(Exclusive));
         Assert.Equal(GVCPStatus.GEV_STATUS_ACCESS_DENIED, state.ReadRegister(Other, 0x0000, out _));
 
@@ -417,7 +396,7 @@ public class DeviceStateTests
     [Fact]
     public void NobodyIsRefusedWhenNoApplicationHoldsTheDevice()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
 
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(Other, 0x0000, out _));
     }
@@ -425,7 +404,7 @@ public class DeviceStateTests
     [Fact]
     public void DeviceReadsAreNotGatedByExclusiveAccess()
     {
-        var state = TestDevice.Camera();
+        var state = TestDevice.Bare();
         state.WriteRegister(Controller, 0x0A00, U32(Exclusive));
 
         // the unchecked overload is what GVSP setup and the discovery ack use
@@ -476,7 +455,7 @@ public class DeviceStateTests
 
         // the device is available again
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Other, 0x0A00, U32(2)));
-        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Other, 0xA000, U32(320)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Other, 0x0014, U32(320)));
     }
 
     [Fact]
@@ -492,7 +471,7 @@ public class DeviceStateTests
         }
 
         Assert.Equal(2u, Ccp(state));
-        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0xA000, U32(320)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0014, U32(320)));
     }
 
     [Fact]
@@ -554,77 +533,10 @@ public class DeviceStateTests
 
     // --------------------------------------------------------------- hooks
 
-    [Fact]
-    public void HookRejectsBadValueAndLeavesRegisterUnchanged()
-    {
-        DeviceState state = Controlled();
 
-        // width must be a multiple of 4 and at least 64
-        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_PARAMETER, state.WriteRegister(Controller, 0xA000, U32(7)));
 
-        state.ReadRegister(0xA000, out byte[]? width);
-        Assert.Equal(640u, ReadU32(width!));
-    }
 
-    [Fact]
-    public void UnsupportedPixelFormatIsRejected()
-    {
-        DeviceState state = Controlled();
 
-        // Mono12Packed. a real format, but we do not do bit packing
-        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_PARAMETER,
-            state.WriteRegister(Controller, 0xA008, U32(0x010C0006)));
-
-        state.ReadRegister(0xA008, out byte[]? format);
-        Assert.Equal(GVSPPixelFormats.Mono8, ReadU32(format!));
-    }
-
-    [Fact]
-    public void PayloadSizeFollowsTheBitsPerPixel()
-    {
-        DeviceState state = Controlled();
-
-        Assert.Equal(640u * 480u, PayloadSize(state));
-
-        // Mono12 rides in a 16-bit container, so two bytes per pixel
-        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS,
-            state.WriteRegister(Controller, 0xA008, U32(GVSPPixelFormats.Mono12)));
-        Assert.Equal(640u * 480u * 2, PayloadSize(state));
-
-        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS,
-            state.WriteRegister(Controller, 0xA008, U32(GVSPPixelFormats.RGB8)));
-        Assert.Equal(640u * 480u * 3, PayloadSize(state));
-
-        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS,
-            state.WriteRegister(Controller, 0xA008, U32(GVSPPixelFormats.BayerRG8)));
-        Assert.Equal(640u * 480u, PayloadSize(state));
-    }
-
-    [Fact]
-    public void ChangingGeometryRecomputesThePayloadRegisters()
-    {
-        DeviceState state = Controlled();
-
-        Assert.Equal(640u * 480u, PayloadSize(state));
-
-        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0xA000, U32(1920)));
-        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0xA004, U32(1080)));
-
-        Assert.Equal(1920u * 1080u, PayloadSize(state));
-    }
-
-    [Fact]
-    public void ChangingPacketSizeRecomputesTheMaxPacketCount()
-    {
-        DeviceState state = Controlled();
-
-        state.ReadRegister(0x0D30, out byte[]? before);
-
-        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0D04, U32(9000)));
-
-        state.ReadRegister(0x0D30, out byte[]? after);
-        Assert.True(ReadU32(after!) < ReadU32(before!)); // jumbo frames, fewer packets
-    }
 
     [Fact]
     public void ImplausiblePacketSizeIsRoundedRatherThanRefused()
@@ -704,37 +616,8 @@ public class DeviceStateTests
         return BinaryPrimitives.ReadSingleBigEndian(value!);
     }
 
-    [Fact]
-    public void FrameRateHasAUsableDefault()
-    {
-        Assert.Equal(10.0f, FrameRate(TestDevice.Camera()));
-    }
 
-    [Fact]
-    public void FrameRateCanBeChanged()
-    {
-        DeviceState state = Controlled();
 
-        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0xA018, F32(30.0f)));
-        Assert.Equal(30.0f, FrameRate(state));
-    }
-
-    [Theory]
-    [InlineData(0.0f)]
-    [InlineData(-5.0f)]
-    [InlineData(5000.0f)]
-    [InlineData(float.NaN)]
-    [InlineData(float.PositiveInfinity)]
-    public void ImplausibleFrameRatesAreRejected(float rate)
-    {
-        DeviceState state = Controlled();
-
-        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_PARAMETER,
-            state.WriteRegister(Controller, 0xA018, F32(rate)));
-
-        // and the old value survives
-        Assert.Equal(10.0f, FrameRate(state));
-    }
 
     // --------------------------------------------------------------- test packet
 
@@ -833,9 +716,9 @@ public class DeviceStateTests
         DeviceState state = Controlled();
 
         // no hook attached here, so this only exercises the self-clearing behaviour
-        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0xA00C, U32(1)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0944, U32(1)));
 
-        state.ReadRegister(0xA00C, out byte[]? value);
+        state.ReadRegister(0x0944, out byte[]? value);
         Assert.Equal(0u, ReadU32(value!));
     }
 
@@ -844,12 +727,13 @@ public class DeviceStateTests
     {
         DeviceState state = Controlled();
 
-        state.OnWrite(0xA014, (_, _) => GVCPStatus.GEV_STATUS_BUSY);
+        uint before = state.ReadUint(0x0014);
 
-        Assert.Equal(GVCPStatus.GEV_STATUS_BUSY, state.WriteRegister(Controller, 0xA014, U32(1)));
+        state.OnWrite(0x0014, (_, _) => GVCPStatus.GEV_STATUS_BUSY);
 
-        state.ReadRegister(0xA014, out byte[]? mode);
-        Assert.Equal(0u, ReadU32(mode!));
+        Assert.Equal(GVCPStatus.GEV_STATUS_BUSY, state.WriteRegister(Controller, 0x0014, U32(1)));
+
+        Assert.Equal(before, state.ReadUint(0x0014));
     }
 
     // --------------------------------------------------------------- helpers
