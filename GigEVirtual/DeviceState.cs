@@ -388,6 +388,50 @@ internal class DeviceState
         return register;
     }
 
+    // adds every fixed-address device register the description declares. an
+    // address we already define is left alone: those carry the bootstrap
+    // behaviour and the hooks, which the description knows nothing about.
+    // returns how many were added, and how many were already covered.
+    public (int Added, int Skipped) DefineFromXml(string xml)
+    {
+        lock (_registersLock)
+        {
+            int added = 0, skipped = 0;
+
+            foreach (XmlRegister register in GenICamXml.Registers(xml))
+            {
+                if (Resolve(register.Address) is not null ||
+                    Overlaps(register.Address, register.Length))
+                {
+                    skipped++;
+                    continue;
+                }
+
+                Define(register.Address, register.Length, register.Access,
+                       needsControl: true, selfClearing: false);
+                added++;
+            }
+
+            return (added, skipped);
+        }
+    }
+
+    // whether a proposed register would run into one that already exists. the
+    // map only works if ranges never overlap.
+    private bool Overlaps(uint address, int length)
+    {
+        uint end = address + (uint)((length + 3) / 4 * 4);
+
+        for (uint position = address; position < end; position += 4)
+            if (Resolve(position) is not null) return true;
+
+        // and make sure we would not swallow the start of a later register
+        foreach (uint existing in _registers.Keys)
+            if (existing >= address && existing < end) return true;
+
+        return false;
+    }
+
     // attaches behaviour to an already-defined register. this is the seam a device
     // implementation uses, instead of GVCP special-casing addresses.
     public void OnWrite(uint address, Func<IPEndPoint, byte[], ushort> hook) =>
