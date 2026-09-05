@@ -26,6 +26,21 @@ internal record StreamSettings(
     // how much light the sensor collected relative to its normal exposure. 1 is
     // unchanged, above brightens, below darkens.
     public Func<float> Brightness { get; init; } = () => 1.0f;
+
+    // whether the device only sends a block when something tells it to. a device
+    // that free-runs leaves this alone.
+    public Func<bool> TriggerEnabled { get; init; } = () => false;
+
+    // takes a waiting trigger, if there is one. asking twice for the same
+    // trigger gives false the second time.
+    public Func<bool> TakeTrigger { get; init; } = () => false;
+
+    // how long the device waits after a trigger before it starts the block
+    public Func<TimeSpan> TriggerDelay { get; init; } = () => TimeSpan.Zero;
+
+    // how many blocks this run sends before it stops on its own. zero streams
+    // until the application says otherwise.
+    public Func<int> BlockLimit { get; init; } = () => 0;
 }
 
 internal class GVSPTransmitter
@@ -132,8 +147,8 @@ internal class GVSPTransmitter
         // await, and Stream only awaits at the end of a block. calling it
         // directly would send a whole frame on the GVCP thread before we get to
         // acknowledge the write that started acquisition
-        CancellationToken token = _cts.Token;
-        _ = Task.Run(() => Stream(token)).ContinueWith(t =>
+        CancellationTokenSource cts = _cts;
+        _ = Task.Run(() => Stream(cts)).ContinueWith(t =>
         {
             if (t.Exception is not null)
                 Console.WriteLine(t.Exception.GetBaseException());
@@ -199,17 +214,33 @@ internal class GVSPTransmitter
 
     public ushort StopAcquisition()
     {
-        _cts?.Cancel();
-        _cts = null;
-
+        // all of it under the lock: a run that is finishing checks whether it is
+        // still the current one before tearing anything down, and that check has
+        // to be atomic against a restart landing in between
         lock (_sendLock)
         {
+            _cts?.Cancel();
+            _cts = null;
+
             _udpClient?.Dispose();
             _udpClient = null;
         }
 
         // stopping while not streaming is not an error
         return GVCPStatus.GEV_STATUS_SUCCESS;
+    }
+
+    // ends a run that stopped on its own, unless a new one has already started
+    private void Finish(CancellationTokenSource cts)
+    {
+        lock (_sendLock)
+        {
+            if (!ReferenceEquals(_cts, cts)) return;
+
+            _cts = null;
+            _udpClient?.Dispose();
+            _udpClient = null;
+        }
     }
 
     // returns false once this run is over, which is the streaming task's cue to
@@ -227,8 +258,10 @@ internal class GVSPTransmitter
         }
     }
 
-    private async Task Stream(CancellationToken ct)
+    private async Task Stream(CancellationTokenSource cts)
     {
+        CancellationToken ct = cts.Token;
+
         // reset blockId
         _block_id = 1;
 
@@ -237,8 +270,27 @@ internal class GVSPTransmitter
         // rate honest instead of letting the send time drift it slower.
         long nextBlockAt = Stopwatch.GetTimestamp();
 
+        int sent = 0;
+
         while (!ct.IsCancellationRequested)
         {
+            if (_settings.TriggerEnabled())
+            {
+                // nothing to do until something trips the trigger. a short wait
+                // rather than a spin, since a trigger can be a long way off.
+                if (!_settings.TakeTrigger())
+                {
+                    await Task.Delay(1, ct);
+                    continue;
+                }
+
+                TimeSpan delay = _settings.TriggerDelay();
+                if (delay > TimeSpan.Zero) await Task.Delay(delay, ct);
+
+                // the wait for the trigger is not part of the frame interval
+                nextBlockAt = Stopwatch.GetTimestamp();
+            }
+
             // packet_id is reset at the start of each block
             _packet_id = 0;
 
@@ -271,6 +323,14 @@ internal class GVSPTransmitter
 
             // increment for next block
             _block_id++;
+            sent++;
+
+            // a run that was asked for a fixed number of frames ends itself
+            int limit = _settings.BlockLimit();
+            if (limit > 0 && sent >= limit) break;
+
+            // a triggered run waits for the next trigger rather than a clock
+            if (_settings.TriggerEnabled()) continue;
 
             // read every block, so an application can change it while streaming
             float frameRate = _settings.FrameRate();
@@ -283,6 +343,9 @@ internal class GVSPTransmitter
             else
                 nextBlockAt = Stopwatch.GetTimestamp(); // fell behind, start again from now
         }
+
+        // a run that ends by itself tidies up the way an explicit stop would
+        Finish(cts);
     }
 
     // holds off the next packet by the delay the application asked for in SCPD0.

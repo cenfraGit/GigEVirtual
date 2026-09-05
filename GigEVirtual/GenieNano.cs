@@ -13,6 +13,20 @@ namespace GigEVirtual;
 
 public class GenieNano : GigEDevice
 {
+    // a trigger that has arrived but not yet produced a block. the register that
+    // fires it and the transmitter that consumes it are on different threads.
+    internal sealed class TriggerGate
+    {
+        private int _pending;
+
+        public void Fire() => Interlocked.Exchange(ref _pending, 1);
+        public bool Take() => Interlocked.Exchange(ref _pending, 0) == 1;
+    }
+
+    // what BuildState hands back: the registers, plus the trigger state that
+    // lives beside them rather than in them
+    internal record Built(DeviceState State, TriggerGate Gate);
+
     // --------------------------------------------------------------- the model
 
     // Nano-M1920: 1920x1200 monochrome. change these four and the device
@@ -49,6 +63,13 @@ public class GenieNano : GigEDevice
     // the description converts Hz to the register with FROM * 1000
     private const uint MilliHertz = 1000;
 
+    // values the description gives these enumerations
+    private const uint ContinuousMode = 0;
+    private const uint SingleFrameMode = 1;
+    private const uint MultiFrameMode = 2;
+    private const uint TriggerOn = 1;
+    private const uint SoftwareTrigger = 0;
+
     private const uint MinFrameRate = 100;        // 0.1 Hz
     private const uint MaxFrameRate = 1000 * MilliHertz;
     private const uint MinExposure = 1;
@@ -61,6 +82,7 @@ public class GenieNano : GigEDevice
     // the description converts a gain factor to the register with 200*log10, so
     // going back is a power of ten. 0 means unity gain.
     private const uint MaxGain = 800;             // 200 * log10(10000)
+    private const uint MaxTriggerDelay = 2_000_000; // 2 s, the range the description gives
 
     // --------------------------------------------------------------- construction
 
@@ -74,18 +96,18 @@ public class GenieNano : GigEDevice
     {
     }
 
-    private GenieNano(DeviceState state, string ip, string? imagePath, bool shareToNetwork)
-        : base(ip, state, Settings(state), imagePath, shareToNetwork)
+    private GenieNano(Built built, string ip, string? imagePath, bool shareToNetwork)
+        : base(ip, built.State, Settings(built), imagePath, shareToNetwork)
     {
-        state.OnWrite(AcquisitionStart, (_, _) => Transmitter.StartAcquisition());
-        state.OnWrite(AcquisitionStop, (_, _) => Transmitter.StopAcquisition());
+        built.State.OnWrite(AcquisitionStart, (_, _) => Transmitter.StartAcquisition());
+        built.State.OnWrite(AcquisitionStop, (_, _) => Transmitter.StopAcquisition());
     }
 
     // --------------------------------------------------------------- registers
 
-    internal static DeviceState BuildState(string xmlPath,
-                                           string serialNumber = "S1234567",
-                                           string deviceName = "Nano-M1920")
+    internal static Built BuildState(string xmlPath,
+                                     string serialNumber = "S1234567",
+                                     string deviceName = "Nano-M1920")
     {
         if (!File.Exists(xmlPath))
             throw new FileNotFoundException($"genie nano device description not found: {xmlPath}");
@@ -100,7 +122,8 @@ public class GenieNano : GigEDevice
                                 serialNumber: serialNumber,
                                 deviceName: deviceName);
 
-        DefineFeatures(state);
+        TriggerGate gate = new();
+        DefineFeatures(state, gate);
 
         // everything else the description declares. this runs second so the
         // registers above keep the hooks and defaults set for them.
@@ -111,13 +134,13 @@ public class GenieNano : GigEDevice
 
         state.RecomputePayload(SensorWidth, SensorHeight, GVSPPixelFormats.Mono8);
 
-        return state;
+        return new Built(state, gate);
     }
 
     // the ones the description cannot pin down, and the ones that have to act.
     // width and height sit behind a formula that picks between a single-roi and a
     // multi-roi address, so they are declared at the single-roi one.
-    private static void DefineFeatures(DeviceState state)
+    private static void DefineFeatures(DeviceState state, TriggerGate gate)
     {
         Define(state, Width, SensorWidth, (_, v) => SetGeometry(state, width: Read(v)));
         Define(state, Height, SensorHeight, (_, v) => SetGeometry(state, height: Read(v)));
@@ -138,14 +161,23 @@ public class GenieNano : GigEDevice
         // commands, which the device clears again once they have run
         Define(state, AcquisitionStart, 0, selfClearing: true);
         Define(state, AcquisitionStop, 0, selfClearing: true);
-        Define(state, TriggerSoftware, 0, selfClearing: true);
+        Define(state, TriggerSoftware, 0, selfClearing: true, onWrite: (_, _) =>
+        {
+            gate.Fire();
+            return GVCPStatus.GEV_STATUS_SUCCESS;
+        });
 
-        // settings the device stores but does not act on yet
-        Define(state, AcquisitionMode, 0);
-        Define(state, AcquisitionFrameCount, 1);
+        Define(state, AcquisitionMode, ContinuousMode, (_, v) =>
+            Read(v) <= MultiFrameMode
+                ? GVCPStatus.GEV_STATUS_SUCCESS
+                : GVCPStatus.GEV_STATUS_INVALID_PARAMETER);
+
+        Define(state, AcquisitionFrameCount, 1, (_, v) =>
+            InRange(Read(v), 1, 65535));
+
         Define(state, TriggerMode, 0);
-        Define(state, TriggerSource, 0);
-        Define(state, TriggerDelay, 0);
+        Define(state, TriggerSource, SoftwareTrigger);
+        Define(state, TriggerDelay, 0, (_, v) => InRange(Read(v), 0, MaxTriggerDelay));
     }
 
     // every register the nano owns is little-endian, and the byte order has to be
@@ -177,13 +209,45 @@ public class GenieNano : GigEDevice
         return state.RecomputePayload(w, h, pixelFormat ?? state.ReadUint(PixelFormat));
     }
 
-    internal static StreamSettings Settings(DeviceState state) => new(
-        Width: () => (int)state.ReadUint(Width),
-        Height: () => (int)state.ReadUint(Height),
-        PixelFormat: () => state.ReadUint(PixelFormat),
-        FrameRate: () => state.ReadUint(FrameRate) / (float)MilliHertz)
+    internal static StreamSettings Settings(Built built)
     {
-        Brightness = () => Brightness(state),
+        DeviceState state = built.State;
+
+        return new StreamSettings(
+            Width: () => (int)state.ReadUint(Width),
+            Height: () => (int)state.ReadUint(Height),
+            PixelFormat: () => state.ReadUint(PixelFormat),
+            FrameRate: () => FrameRateCeiling(state))
+        {
+            Brightness = () => Brightness(state),
+
+            // a source other than software means a cable we do not have, so the
+            // device waits for a trigger that never comes. that is what a real
+            // camera does with nothing plugged in.
+            TriggerEnabled = () => state.ReadUint(TriggerMode) == TriggerOn,
+            TakeTrigger = () => state.ReadUint(TriggerSource) == SoftwareTrigger && built.Gate.Take(),
+            TriggerDelay = () => TimeSpan.FromMicroseconds(state.ReadUint(TriggerDelay)),
+            BlockLimit = () => BlockLimit(state),
+        };
+    }
+
+    // a sensor cannot produce frames faster than it takes to expose one, so a
+    // long exposure holds the rate down however fast the register asks for
+    internal static float FrameRateCeiling(DeviceState state)
+    {
+        float requested = state.ReadUint(FrameRate) / (float)MilliHertz;
+        float ceiling = 1_000_000f / state.ReadUint(ExposureTime);
+
+        return MathF.Min(requested, ceiling);
+    }
+
+    // how many blocks the current acquisition mode asks for. continuous streams
+    // until stopped, so it asks for none in particular.
+    internal static int BlockLimit(DeviceState state) => state.ReadUint(AcquisitionMode) switch
+    {
+        SingleFrameMode => 1,
+        MultiFrameMode => (int)state.ReadUint(AcquisitionFrameCount),
+        _ => 0,
     };
 
     // a sensor collects light in proportion to how long it is exposed, and gain

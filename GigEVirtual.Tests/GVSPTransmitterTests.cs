@@ -13,6 +13,7 @@ using Xunit;
 
 namespace GigEVirtual.Tests;
 
+[Collection(SocketTests.Name)]
 public class GVSPTransmitterTests : IDisposable
 {
     private static readonly IPEndPoint Controller = new(IPAddress.Parse("127.0.0.1"), 50000);

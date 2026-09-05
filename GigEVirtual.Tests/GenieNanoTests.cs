@@ -17,6 +17,7 @@ using Xunit;
 
 namespace GigEVirtual.Tests;
 
+[Collection(SocketTests.Name)]
 public class GenieNanoTests : IDisposable
 {
     private static readonly IPEndPoint Controller = new(IPAddress.Parse("127.0.0.1"), 50000);
@@ -28,9 +29,16 @@ public class GenieNanoTests : IDisposable
     private const uint FrameRate = 0x200000B0;
     private const uint ExposureTime = 0x20004BFC;
     private const uint Gain = 0x20001530;
+    private const uint AcquisitionMode = 0x20000040;
+    private const uint AcquisitionFrameCount = 0x20000050;
+    private const uint TriggerMode = 0x20000F80;
+    private const uint TriggerSource = 0x20001000;
+    private const uint TriggerDelay = 0x200010C0;
+    private const uint TriggerSoftware = 0x20001100;
 
     private readonly string _dir;
     private readonly string _xmlPath;
+    private readonly GenieNano.Built _built;
     private readonly DeviceState _state;
 
     public GenieNanoTests()
@@ -41,11 +49,17 @@ public class GenieNanoTests : IDisposable
         _xmlPath = Path.Combine(_dir, "genie_nano.xml");
         File.WriteAllText(_xmlPath, Fixture);
 
-        _state = GenieNano.BuildState(_xmlPath);
+        _built = GenieNano.BuildState(_xmlPath);
+        _state = _built.State;
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, _state.WriteRegister(Controller, 0x0A00, U32BE(2)));
     }
 
-    public void Dispose() => Directory.Delete(_dir, recursive: true);
+    public void Dispose()
+    {
+        _transmitter?.StopAcquisition();
+        _receiver?.Dispose();
+        Directory.Delete(_dir, recursive: true);
+    }
 
     // stands in for the vendor file: same port, plus one register the device does
     // not declare itself, so the generated path is exercised as well
@@ -136,7 +150,7 @@ public class GenieNanoTests : IDisposable
         Assert.Equal(30_000u, _state.ReadUint(FrameRate)); // 30 Hz
 
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(FrameRate, 12_500));
-        Assert.Equal(12.5f, GenieNano.Settings(_state).FrameRate());
+        Assert.Equal(12.5f, GenieNano.Settings(_built).FrameRate());
     }
 
     [Fact]
@@ -223,34 +237,102 @@ public class GenieNanoTests : IDisposable
             () => GenieNano.BuildState(Path.Combine(_dir, "nope.xml")));
     }
 
-    // --------------------------------------------------------------- streaming
+    // --------------------------------------------------------------- timing
 
     [Fact]
-    public void ItStreamsItsOwnGeometry()
+    public void ALongExposureHoldsTheFrameRateDown()
     {
-        using var receiver = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
-        int port = ((IPEndPoint)receiver.Client.LocalEndPoint!).Port;
+        // 100 ms of exposure cannot produce more than ten frames a second, no
+        // matter what the frame rate register asks for
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ExposureTime, 100_000));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(FrameRate, 60_000));
 
-        var transmitter = new GVSPTransmitter(_state, IPAddress.Loopback, new ImageSource(),
-                                              GenieNano.Settings(_state));
+        Assert.Equal(10.0f, GenieNano.FrameRateCeiling(_state), 2);
+
+        // a short exposure leaves the register in charge again
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ExposureTime, 1_000));
+        Assert.Equal(60.0f, GenieNano.FrameRateCeiling(_state), 2);
+    }
+
+    [Fact]
+    public void AcquisitionModeDecidesHowManyBlocksARunSends()
+    {
+        Assert.Equal(0, GenieNano.BlockLimit(_state)); // continuous, no limit
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(AcquisitionMode, 1));
+        Assert.Equal(1, GenieNano.BlockLimit(_state));
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(AcquisitionMode, 2));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(AcquisitionFrameCount, 7));
+        Assert.Equal(7, GenieNano.BlockLimit(_state));
+    }
+
+    [Fact]
+    public void AnUnknownAcquisitionModeIsRefused()
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_PARAMETER, Write(AcquisitionMode, 9));
+    }
+
+    // --------------------------------------------------------------- streaming
+
+    private UdpClient? _receiver;
+    private GVSPTransmitter? _transmitter;
+
+    // a transmitter pointed at a loopback receiver, with a small frame so the
+    // tests stay quick
+    private GVSPTransmitter Streaming()
+    {
+        _receiver = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        int port = ((IPEndPoint)_receiver.Client.LocalEndPoint!).Port;
 
         Write(Width, 64);
         Write(Height, 48);
-        Write(FrameRate, 50_000);
 
         _state.WriteRegister(Controller, 0x0D18, U32BE(0x7F000001));
         _state.WriteRegister(Controller, 0x0D00, U32BE((uint)port));
 
+        _transmitter = new GVSPTransmitter(_state, IPAddress.Loopback, new ImageSource(),
+                                           GenieNano.Settings(_built));
+        return _transmitter;
+    }
+
+    // leaders seen in the window. one leader is one block.
+    private int Blocks(TimeSpan window)
+    {
+        int count = 0;
+        _receiver!.Client.ReceiveTimeout = 100;
+        IPEndPoint from = new(IPAddress.Any, 0);
+        DateTime until = DateTime.UtcNow + window;
+
+        while (DateTime.UtcNow < until)
+        {
+            try
+            {
+                byte[] packet = _receiver.Receive(ref from);
+                if ((packet[4] & 0x0F) == 1) count++;
+            }
+            catch (SocketException) { }
+        }
+
+        return count;
+    }
+
+    [Fact]
+    public void ItStreamsItsOwnGeometry()
+    {
+        GVSPTransmitter transmitter = Streaming();
+        Write(FrameRate, 50_000);
+
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, transmitter.StartAcquisition());
 
         var packets = new List<byte[]>();
-        receiver.Client.ReceiveTimeout = 200;
+        _receiver!.Client.ReceiveTimeout = 200;
         IPEndPoint from = new(IPAddress.Any, 0);
         DateTime until = DateTime.UtcNow + TimeSpan.FromMilliseconds(500);
 
         while (DateTime.UtcNow < until)
         {
-            try { packets.Add(receiver.Receive(ref from)); }
+            try { packets.Add(_receiver.Receive(ref from)); }
             catch (SocketException) { }
         }
 
@@ -259,9 +341,107 @@ public class GenieNanoTests : IDisposable
         byte[][] leaders = [.. packets.Where(p => (p[4] & 0x0F) == 1)];
         Assert.NotEmpty(leaders);
 
-        // the leader carries what the nano's own registers say
+        // the leader carries what the nano registers say
         Assert.Equal(GVSPPixelFormats.Mono8, BinaryPrimitives.ReadUInt32BigEndian(leaders[0].AsSpan(32, 4)));
         Assert.Equal(64u, BinaryPrimitives.ReadUInt32BigEndian(leaders[0].AsSpan(36, 4)));
         Assert.Equal(48u, BinaryPrimitives.ReadUInt32BigEndian(leaders[0].AsSpan(40, 4)));
+    }
+
+    // --------------------------------------------------------------- trigger
+
+    [Fact]
+    public void WithTheTriggerOnNothingArrivesUntilItFires()
+    {
+        GVSPTransmitter transmitter = Streaming();
+        Write(FrameRate, 50_000);
+        Write(TriggerMode, 1);
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, transmitter.StartAcquisition());
+
+        // free-running it would have sent about twenty blocks by now
+        Assert.Equal(0, Blocks(TimeSpan.FromMilliseconds(400)));
+
+        transmitter.StopAcquisition();
+    }
+
+    [Fact]
+    public void EachSoftwareTriggerProducesExactlyOneBlock()
+    {
+        GVSPTransmitter transmitter = Streaming();
+        Write(TriggerMode, 1);
+        transmitter.StartAcquisition();
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(TriggerSoftware, 1));
+        Assert.Equal(1, Blocks(TimeSpan.FromMilliseconds(300)));
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(TriggerSoftware, 1));
+        Assert.Equal(1, Blocks(TimeSpan.FromMilliseconds(300)));
+
+        // and nothing more without another one
+        Assert.Equal(0, Blocks(TimeSpan.FromMilliseconds(300)));
+
+        transmitter.StopAcquisition();
+    }
+
+    [Fact]
+    public void ATriggerSourceWeHaveNoCableForNeverFires()
+    {
+        GVSPTransmitter transmitter = Streaming();
+        Write(TriggerMode, 1);
+        Write(TriggerSource, 6); // Line1
+
+        transmitter.StartAcquisition();
+        Write(TriggerSoftware, 1);
+
+        Assert.Equal(0, Blocks(TimeSpan.FromMilliseconds(300)));
+
+        transmitter.StopAcquisition();
+    }
+
+    [Fact]
+    public void TheTriggerDelayHoldsTheBlockBack()
+    {
+        GVSPTransmitter transmitter = Streaming();
+        Write(TriggerMode, 1);
+        Write(TriggerDelay, 400_000); // 400 ms
+
+        transmitter.StartAcquisition();
+        Write(TriggerSoftware, 1);
+
+        Assert.Equal(0, Blocks(TimeSpan.FromMilliseconds(200)));
+        Assert.Equal(1, Blocks(TimeSpan.FromMilliseconds(500)));
+
+        transmitter.StopAcquisition();
+    }
+
+    // --------------------------------------------------------------- acquisition mode
+
+    [Fact]
+    public void SingleFrameSendsOneBlockAndStops()
+    {
+        GVSPTransmitter transmitter = Streaming();
+        Write(FrameRate, 50_000);
+        Write(AcquisitionMode, 1);
+
+        transmitter.StartAcquisition();
+
+        Assert.Equal(1, Blocks(TimeSpan.FromMilliseconds(400)));
+
+        // the run ended by itself, so the device is idle again
+        Assert.False(transmitter.IsStreaming);
+    }
+
+    [Fact]
+    public void MultiFrameSendsTheCountItWasGiven()
+    {
+        GVSPTransmitter transmitter = Streaming();
+        Write(FrameRate, 50_000);
+        Write(AcquisitionMode, 2);
+        Write(AcquisitionFrameCount, 5);
+
+        transmitter.StartAcquisition();
+
+        Assert.Equal(5, Blocks(TimeSpan.FromMilliseconds(700)));
+        Assert.False(transmitter.IsStreaming);
     }
 }
