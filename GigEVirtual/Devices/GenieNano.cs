@@ -50,12 +50,48 @@ public class GenieNano : GigEDevice
     private const uint Width = 0x20000070;
     private const uint Height = 0x20000090;
     private const uint FrameRate = 0x200000B0;   // milli-hertz
+    private const uint FrameRateMin = 0x200000B4;
+    private const uint FrameRateMax = 0x200000B8;
+
+    // the description hides the frame rate entirely unless this is on, so a
+    // device that free-runs at a set rate comes up with it already on
+    private const uint FrameRateEnable = 0x20001FD0;
     private const uint TriggerMode = 0x20000F80;
     private const uint TriggerSource = 0x20001000;
     private const uint TriggerDelay = 0x200010C0; // microseconds
     private const uint TriggerSoftware = 0x20001100;
     private const uint ExposureTime = 0x20004BFC; // microseconds
     private const uint Gain = 0x20001530;         // 200 * log10(factor)
+
+    // the description points every feature's min, max and increment at a register
+    // of its own, and an application refuses to write a feature whose bounds read
+    // zero. these are those registers, all found by resolving the pMin and pMax
+    // chains in the description back to addresses.
+    private const uint WidthMin = 0x20000074;
+    private const uint WidthMax = 0x20000078;
+    private const uint WidthInc = 0x2000007C;
+    private const uint HeightMin = 0x20000094;
+    private const uint HeightMax = 0x20000098;
+    private const uint HeightInc = 0x2000009C;
+    private const uint ExposureMin = 0x20004BF4;
+    private const uint ExposureMax = 0x20004BF8;
+    private const uint ExposureMaxLive = 0x20001FE0; // the limit while streaming
+    private const uint GainMin = 0x20001534;
+    private const uint GainMax = 0x20001538;
+    private const uint FrameCountMin = 0x20000054;
+    private const uint FrameCountMax = 0x20000058;
+    private const uint BinningMaxX = 0x20003BFC;
+    private const uint BinningMaxY = 0x20002A40;
+
+    // what the sensor can actually do. the description reads these to work out
+    // which features exist at all, and every register it generates itself starts
+    // at zero, which reads as a camera that can do nothing.
+    private const uint PixelFormatCaps = 0x20001120;   // one bit per format
+    private const uint EffectiveBinningX = 0x20002A50;
+    private const uint EffectiveBinningY = 0x20002A60;
+
+    // mono8, mono10 and mono12, which are bits 0, 1 and 2
+    private const uint MonoFormats = 0b111;
 
     // the description reaches 0xB0000000, so the blob sits clear of all of it
     private const uint XmlAddress = 0xF0000000;
@@ -69,9 +105,12 @@ public class GenieNano : GigEDevice
     private const uint MultiFrameMode = 2;
     private const uint TriggerOn = 1;
     private const uint SoftwareTrigger = 0;
+    private const uint Line1Trigger = 6;
+    private const uint Line2Trigger = 7;
 
     private const uint MinFrameRate = 100;        // 0.1 Hz
     private const uint MaxFrameRate = 1000 * MilliHertz;
+    private const uint DefaultFrameRate = 30 * MilliHertz;
     private const uint MinExposure = 1;
     private const uint MaxExposure = 2_000_000;   // 2 s, matching the trigger delay range
 
@@ -83,8 +122,11 @@ public class GenieNano : GigEDevice
     // going back is a power of ten. 0 means unity gain.
     private const uint MaxGain = 800;             // 200 * log10(10000)
     private const uint MaxTriggerDelay = 2_000_000; // 2 s, the range the description gives
+    private const uint MaxFrameCount = 65535;
 
     // --------------------------------------------------------------- construction
+
+    private readonly Built _built;
 
     public GenieNano(string ip,
                      string xmlPath,
@@ -99,9 +141,42 @@ public class GenieNano : GigEDevice
     private GenieNano(Built built, string ip, string? imagePath, bool shareToNetwork)
         : base(ip, built.State, Settings(built), imagePath, shareToNetwork)
     {
+        _built = built;
+
         built.State.OnWrite(AcquisitionStart, (_, _) => Transmitter.StartAcquisition());
         built.State.OnWrite(AcquisitionStop, (_, _) => Transmitter.StopAcquisition());
     }
+
+    // --------------------------------------------------------------- the wiring
+
+    // brings the device up already waiting on one of its input lines, which is
+    // what a real nano does when it boots with a user set that says so. line 1
+    // or line 2.
+    public void UseHardwareTrigger(int line)
+    {
+        State.WriteUint(TriggerSource, LineTrigger(line));
+        State.WriteUint(TriggerMode, TriggerOn);
+    }
+
+    // stands in for a signal arriving on the connector. there is no connector,
+    // so whatever calls this is the cable. false means the device is listening
+    // to a different source and the pulse went nowhere, exactly as it would.
+    public bool PulseLine(int line) => Pulse(_built, line);
+
+    internal static bool Pulse(Built built, int line)
+    {
+        if (built.State.ReadUint(TriggerSource) != LineTrigger(line)) return false;
+
+        built.Gate.Fire();
+        return true;
+    }
+
+    private static uint LineTrigger(int line) => line switch
+    {
+        1 => Line1Trigger,
+        2 => Line2Trigger,
+        _ => throw new ArgumentOutOfRangeException(nameof(line), "the nano has line 1 and line 2"),
+    };
 
     // --------------------------------------------------------------- registers
 
@@ -150,17 +225,36 @@ public class GenieNano : GigEDevice
                 ? SetGeometry(state, pixelFormat: Read(v))
                 : GVCPStatus.GEV_STATUS_INVALID_PARAMETER);
 
-        Define(state, FrameRate, 30 * MilliHertz, (_, v) =>
-            InRange(Read(v), MinFrameRate, MaxFrameRate));
+        Define(state, FrameRate, DefaultFrameRate, (_, v) =>
+        {
+            if (InRange(Read(v), MinFrameRate, MaxFrameRate) != GVCPStatus.GEV_STATUS_SUCCESS)
+                return GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
+
+            // a frame cannot be exposed for longer than it lasts
+            state.WriteUint(ExposureMaxLive, FramePeriod(Read(v)));
+
+            return GVCPStatus.GEV_STATUS_SUCCESS;
+        });
 
         Define(state, ExposureTime, (uint)ReferenceExposure, (_, v) =>
-            InRange(Read(v), MinExposure, MaxExposure));
+        {
+            if (InRange(Read(v), MinExposure, MaxExposure) != GVCPStatus.GEV_STATUS_SUCCESS)
+                return GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
+
+            // a sensor cannot produce frames faster than it takes to expose one,
+            // and this register is how an application finds that limit out
+            state.WriteUint(FrameRateMax, Math.Min(MaxFrameRate, 1_000_000_000 / Read(v)));
+
+            return GVCPStatus.GEV_STATUS_SUCCESS;
+        });
 
         Define(state, Gain, 0, (_, v) => InRange(Read(v), 0, MaxGain));
 
         // commands, which the device clears again once they have run
         Define(state, AcquisitionStart, 0, selfClearing: true);
         Define(state, AcquisitionStop, 0, selfClearing: true);
+        // the description is explicit that this one fires "no matter what the
+        // TriggerSource feature is set to", so it does not consult the source
         Define(state, TriggerSoftware, 0, selfClearing: true, onWrite: (_, _) =>
         {
             gate.Fire();
@@ -173,9 +267,35 @@ public class GenieNano : GigEDevice
                 : GVCPStatus.GEV_STATUS_INVALID_PARAMETER);
 
         Define(state, AcquisitionFrameCount, 1, (_, v) =>
-            InRange(Read(v), 1, 65535));
+            InRange(Read(v), 1, MaxFrameCount));
 
         Define(state, TriggerMode, 0);
+        Define(state, FrameRateEnable, 1);
+
+        DefineReadOnly(state, PixelFormatCaps, MonoFormats);
+        DefineReadOnly(state, FrameRateMin, MinFrameRate);
+        DefineReadOnly(state, FrameRateMax, MaxFrameRate);
+        DefineReadOnly(state, EffectiveBinningX, 1);
+        DefineReadOnly(state, EffectiveBinningY, 1);
+
+        // binning is not modelled, so one is the only factor on offer. the
+        // description divides by these, so zero is not a harmless default.
+        DefineReadOnly(state, BinningMaxX, 1);
+        DefineReadOnly(state, BinningMaxY, 1);
+
+        DefineReadOnly(state, WidthMin, SizeIncrement);
+        DefineReadOnly(state, WidthMax, SensorWidth);
+        DefineReadOnly(state, WidthInc, SizeIncrement);
+        DefineReadOnly(state, HeightMin, 1);
+        DefineReadOnly(state, HeightMax, SensorHeight);
+        DefineReadOnly(state, HeightInc, 1);
+        DefineReadOnly(state, ExposureMin, MinExposure);
+        DefineReadOnly(state, ExposureMax, MaxExposure);
+        DefineReadOnly(state, ExposureMaxLive, FramePeriod(DefaultFrameRate));
+        DefineReadOnly(state, GainMin, 0);
+        DefineReadOnly(state, GainMax, MaxGain);
+        DefineReadOnly(state, FrameCountMin, 1);
+        DefineReadOnly(state, FrameCountMax, MaxFrameCount);
         Define(state, TriggerSource, SoftwareTrigger);
         Define(state, TriggerDelay, 0, (_, v) => InRange(Read(v), 0, MaxTriggerDelay));
     }
@@ -188,6 +308,13 @@ public class GenieNano : GigEDevice
         state.DefineUint(address, RegAccess.ReadWrite, value,
                          selfClearing: selfClearing, onWrite: onWrite,
                          endianness: Endianness.Little);
+
+    // how long one frame lasts at a given rate, in microseconds
+    private static uint FramePeriod(uint frameRate) =>
+        Math.Min(MaxExposure, 1_000_000_000 / frameRate);
+
+    private static void DefineReadOnly(DeviceState state, uint address, uint value) =>
+        state.DefineUint(address, RegAccess.ReadOnly, value, endianness: Endianness.Little);
 
     private static ushort InRange(uint value, uint min, uint max) =>
         value >= min && value <= max
@@ -221,11 +348,10 @@ public class GenieNano : GigEDevice
         {
             Brightness = () => Brightness(state),
 
-            // a source other than software means a cable we do not have, so the
-            // device waits for a trigger that never comes. that is what a real
-            // camera does with nothing plugged in.
+            // whoever fired the gate already checked they were the selected
+            // source, so by here a waiting trigger is a real one
             TriggerEnabled = () => state.ReadUint(TriggerMode) == TriggerOn,
-            TakeTrigger = () => state.ReadUint(TriggerSource) == SoftwareTrigger && built.Gate.Take(),
+            TakeTrigger = () => built.Gate.Take(),
             TriggerDelay = () => TimeSpan.FromMicroseconds(state.ReadUint(TriggerDelay)),
             BlockLimit = () => BlockLimit(state),
         };

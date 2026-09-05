@@ -1,4 +1,5 @@
 <Solution>
   <Project Path="GigEVirtual/GigEVirtual.csproj" />
   <Project Path="GigEVirtual.Tests/GigEVirtual.Tests.csproj" />
+  <Project Path="GigEVirtual.Halcon/GigEVirtual.Halcon.csproj" />
 </Solution>

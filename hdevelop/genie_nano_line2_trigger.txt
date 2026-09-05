@@ -1,0 +1,59 @@
+* --------------------------------------------------------------------------------
+* genie_nano_line2_trigger
+*
+* grabs from the virtual genie nano while it waits on hardware trigger line 2.
+* paste this into an hdevelop program window and run it.
+*
+* start GigEVirtual first. it brings the device up already in trigger mode on
+* line 2, so nothing below has to configure the trigger. every keypress in the
+* GigEVirtual console is one pulse on the line, and one frame here.
+* --------------------------------------------------------------------------------
+
+* which devices are on the wire. the nano comes back as something like
+* 'unique_name:0246...._TeledyneDALSA_NanoM1920', and the whole string works as
+* the device parameter below.
+info_framegrabber ('GigEVision2', 'device', Information, ValueList)
+DeviceName := ValueList[0]
+
+* every argument but the device is this interface's own default, and it rejects
+* anything else: 'progressive' is the only legal field, and line_in has to be 0.
+* info_framegrabber('GigEVision2', 'defaults', ...) is where these come from.
+open_framegrabber ('GigEVision2', 0, 0, 0, 0, 0, 0, 'progressive', -1, 'default', \
+                   -1, 'false', 'default', DeviceName, 0, 0, AcqHandle)
+
+* the device is waiting for a pulse, so a grab can sit here a long time
+set_framegrabber_param (AcqHandle, 'grab_timeout', 60000)
+
+* the device already set these, so they are here to show the feature names
+* rather than because the grab needs them
+* set_framegrabber_param (AcqHandle, 'TriggerSelector', 'FrameStart')
+* set_framegrabber_param (AcqHandle, 'TriggerMode', 'On')
+* set_framegrabber_param (AcqHandle, 'TriggerSource', 'Line2')
+
+* microseconds. 10000 is what the image on disk is taken to represent, so
+* raising this brightens the frame and lowering it darkens it.
+set_framegrabber_param (AcqHandle, 'ExposureTime', 10000)
+
+* the delay the device waits after the pulse before it starts the frame
+set_framegrabber_param (AcqHandle, 'TriggerDelay', 0)
+
+grab_image_start (AcqHandle, -1)
+
+* one frame per keypress in the GigEVirtual console. stop the program to end it.
+while (true)
+    grab_image_async (Image, AcqHandle, -1)
+    dev_display (Image)
+endwhile
+
+close_framegrabber (AcqHandle)
+
+* --------------------------------------------------------------------------------
+* the same thing without the keyboard: the software trigger fires whatever the
+* source is set to, which is what the device description says it does.
+* --------------------------------------------------------------------------------
+* grab_image_start (AcqHandle, -1)
+* for I := 1 to 10 by 1
+*     set_framegrabber_param (AcqHandle, 'TriggerSoftware', 1)
+*     grab_image_async (Image, AcqHandle, -1)
+*     dev_display (Image)
+* endfor

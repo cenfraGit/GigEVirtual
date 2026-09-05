@@ -35,6 +35,22 @@ public class GenieNanoTests : IDisposable
     private const uint TriggerSource = 0x20001000;
     private const uint TriggerDelay = 0x200010C0;
     private const uint TriggerSoftware = 0x20001100;
+    private const uint PixelFormatCaps = 0x20001120;
+    private const uint EffectiveBinningX = 0x20002A50;
+    private const uint EffectiveBinningY = 0x20002A60;
+    private const uint FrameRateMax = 0x200000B8;
+    private const uint WidthMin = 0x20000074;
+    private const uint WidthMax = 0x20000078;
+    private const uint WidthInc = 0x2000007C;
+    private const uint HeightMin = 0x20000094;
+    private const uint HeightMax = 0x20000098;
+    private const uint ExposureMin = 0x20004BF4;
+    private const uint ExposureMax = 0x20004BF8;
+    private const uint ExposureMaxLive = 0x20001FE0;
+    private const uint GainMax = 0x20001538;
+    private const uint FrameCountMax = 0x20000058;
+    private const uint BinningMaxX = 0x20003BFC;
+    private const uint BinningMaxY = 0x20002A40;
 
     private readonly string _dir;
     private readonly string _xmlPath;
@@ -395,16 +411,65 @@ public class GenieNanoTests : IDisposable
         transmitter.StopAcquisition();
     }
 
+    // the description says the software command fires "no matter what the
+    // TriggerSource feature is set to", so selecting a line does not silence it
     [Fact]
-    public void ATriggerSourceWeHaveNoCableForNeverFires()
+    public void ASoftwareTriggerFiresEvenWhenALineIsSelected()
     {
         GVSPTransmitter transmitter = Streaming();
         Write(TriggerMode, 1);
-        Write(TriggerSource, 6); // Line1
+        Write(TriggerSource, 7); // Line2
 
         transmitter.StartAcquisition();
         Write(TriggerSoftware, 1);
 
+        Assert.Equal(1, Blocks(TimeSpan.FromMilliseconds(300)));
+
+        transmitter.StopAcquisition();
+    }
+
+    [Fact]
+    public void APulseOnTheSelectedLineProducesExactlyOneBlock()
+    {
+        GVSPTransmitter transmitter = Streaming();
+        Write(TriggerMode, 1);
+        Write(TriggerSource, 7); // Line2
+
+        transmitter.StartAcquisition();
+
+        Assert.True(GenieNano.Pulse(_built, 2));
+        Assert.Equal(1, Blocks(TimeSpan.FromMilliseconds(300)));
+
+        // and nothing more until the next pulse
+        Assert.Equal(0, Blocks(TimeSpan.FromMilliseconds(300)));
+
+        transmitter.StopAcquisition();
+    }
+
+    [Fact]
+    public void APulseOnALineTheDeviceIsNotListeningToGoesNowhere()
+    {
+        GVSPTransmitter transmitter = Streaming();
+        Write(TriggerMode, 1);
+        Write(TriggerSource, 7); // Line2
+
+        transmitter.StartAcquisition();
+
+        Assert.False(GenieNano.Pulse(_built, 1));
+        Assert.Equal(0, Blocks(TimeSpan.FromMilliseconds(300)));
+
+        transmitter.StopAcquisition();
+    }
+
+    [Fact]
+    public void ALinePulseGoesNowhereWhileTheSourceIsSoftware()
+    {
+        GVSPTransmitter transmitter = Streaming();
+        Write(TriggerMode, 1);
+
+        transmitter.StartAcquisition();
+
+        Assert.False(GenieNano.Pulse(_built, 2));
         Assert.Equal(0, Blocks(TimeSpan.FromMilliseconds(300)));
 
         transmitter.StopAcquisition();
@@ -472,5 +537,105 @@ public class GenieNanoTests : IDisposable
             Assert.Equal(1, Blocks(TimeSpan.FromMilliseconds(300)));
             WaitUntilIdle(transmitter);
         }
+    }
+
+    // --------------------------------------------------------------- capabilities
+
+    // an application reads these to decide the device can do anything at all.
+    // everything generated from the description starts at zero, and zero here
+    // reads as a camera with no pixel formats and a binning factor of nothing.
+    [Fact]
+    public void ItReportsTheThreeMonoFormatsAsImplemented()
+    {
+        Assert.Equal(0b111u, _state.ReadUint(PixelFormatCaps));
+    }
+
+    [Fact]
+    public void BinningIsOneRatherThanZero()
+    {
+        Assert.Equal(1u, _state.ReadUint(EffectiveBinningX));
+        Assert.Equal(1u, _state.ReadUint(EffectiveBinningY));
+    }
+
+    [Fact]
+    public void TheFrameRateCeilingFollowsTheExposure()
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ExposureTime, 100_000)); // 100 ms
+
+        // 10 hz, in milli-hertz
+        Assert.Equal(10_000u, _state.ReadUint(FrameRateMax));
+    }
+
+    [Fact]
+    public void ARejectedExposureLeavesTheCeilingAlone()
+    {
+        uint before = _state.ReadUint(FrameRateMax);
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_PARAMETER, Write(ExposureTime, 0));
+        Assert.Equal(before, _state.ReadUint(FrameRateMax));
+    }
+
+    // an application saves its settings against the mac, so a device that draws
+    // a new one every start looks like a different camera every time
+    [Fact]
+    public void TheMacIsTheSameEveryTimeForTheSameSerialNumber()
+    {
+        uint first = GenieNano.BuildState(_xmlPath, serialNumber: "S7").State.ReadUint(0x0008);
+        uint second = GenieNano.BuildState(_xmlPath, serialNumber: "S7").State.ReadUint(0x0008);
+        uint other = GenieNano.BuildState(_xmlPath, serialNumber: "S8").State.ReadUint(0x0008);
+
+        Assert.Equal(first, second);
+        Assert.NotEqual(first, other);
+    }
+
+    // --------------------------------------------------------------- limits
+
+    // an application reads a feature's bounds before it will write the feature,
+    // and bounds of zero to zero mean nothing can be written at all
+    [Fact]
+    public void TheGeometryBoundsAreTheSensor()
+    {
+        Assert.Equal(4u, _state.ReadUint(WidthMin));
+        Assert.Equal(1920u, _state.ReadUint(WidthMax));
+        Assert.Equal(4u, _state.ReadUint(WidthInc));
+        Assert.Equal(1u, _state.ReadUint(HeightMin));
+        Assert.Equal(1200u, _state.ReadUint(HeightMax));
+    }
+
+    [Fact]
+    public void TheExposureAndGainBoundsAreNotZero()
+    {
+        Assert.Equal(1u, _state.ReadUint(ExposureMin));
+        Assert.Equal(2_000_000u, _state.ReadUint(ExposureMax));
+        Assert.Equal(800u, _state.ReadUint(GainMax));
+        Assert.Equal(65535u, _state.ReadUint(FrameCountMax));
+    }
+
+    // the description divides by the binning factor, so zero is not a harmless
+    // default for these two
+    [Fact]
+    public void TheBinningFactorsAreOne()
+    {
+        Assert.Equal(1u, _state.ReadUint(BinningMaxX));
+        Assert.Equal(1u, _state.ReadUint(BinningMaxY));
+    }
+
+    [Fact]
+    public void TheLiveExposureCeilingFollowsTheFrameRate()
+    {
+        // 33 ms at the default 30 hz
+        Assert.Equal(33_333u, _state.ReadUint(ExposureMaxLive));
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(FrameRate, 10_000)); // 10 hz
+        Assert.Equal(100_000u, _state.ReadUint(ExposureMaxLive));
+    }
+
+    [Fact]
+    public void ARejectedFrameRateLeavesTheLiveCeilingAlone()
+    {
+        uint before = _state.ReadUint(ExposureMaxLive);
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_PARAMETER, Write(FrameRate, 0));
+        Assert.Equal(before, _state.ReadUint(ExposureMaxLive));
     }
 }

@@ -9,6 +9,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace GigEVirtual;
@@ -139,11 +140,13 @@ internal class DeviceState
             Pack(value: 2, specBitStart: 24, width: 8); // character_set_index
         DefineUint(0x0004, RegAccess.ReadOnly, deviceMode);
 
-        // generate random mac (temp)
-        var rnd = new Random();
-        byte[] mac = new byte[6];
-        rnd.NextBytes(mac);
-        mac[0] = (byte)(mac[0] & 0xFE);
+        // a real device keeps the same mac forever, and an application keys its
+        // saved settings off it, so derive one from the serial number rather
+        // than drawing a new one every start. the low bit of the first byte
+        // clear makes it a unicast address, the next bit set makes it locally
+        // administered.
+        byte[] mac = SHA256.HashData(Encoding.ASCII.GetBytes(serialNumber))[..6];
+        mac[0] = (byte)((mac[0] & 0xFE) | 0x02);
 
         // device mac address (high)
         DefineUint(0x0008, RegAccess.ReadOnly, (uint)((mac[0] << 8) | mac[1]));
@@ -561,6 +564,14 @@ internal class DeviceState
 
     private Endianness EndiannessAt(uint address) =>
         Resolve(address)?.Endianness ?? Endianness.Big;
+
+    // the device setting one of its own registers, the way a real camera comes up
+    // with a saved user set already applied. no control channel and no hook,
+    // because nothing on the network asked for it.
+    public void WriteUint(uint address, uint value)
+    {
+        lock (_registersLock) PokeUint(address, value);
+    }
 
     // the value of a 4-byte register, read the way that register stores it. this
     // is what anything outside DeviceState should use rather than parsing the
