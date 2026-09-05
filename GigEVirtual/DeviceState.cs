@@ -77,6 +77,15 @@ internal class DeviceState
     // where the free-running timestamp counter was last reset from
     private long _timestampOrigin = Stopwatch.GetTimestamp();
 
+    // set by the device. firing a test packet needs a socket, which is the
+    // transmitter's business rather than ours
+    private Func<int, ushort>? _fireTestPacket;
+
+    // the packet sizes we can actually serve. a request outside this gets
+    // rounded rather than refused
+    private const uint MinPacketSize = 576;
+    private const uint MaxPacketSize = 16384;
+
     // --------------------------------------------------------------- constructors
 
     public DeviceState(string manufacturerName = "cenfra",
@@ -188,6 +197,7 @@ internal class DeviceState
         uint gvcpCapability =
             Pack(1, specBitStart: 0, width: 1) |  // user_defined_name supported
             Pack(1, specBitStart: 1, width: 1) |  // serial_number supported
+            Pack(1, specBitStart: 6, width: 1) |  // test packets carry LFSR data
             Pack(1, specBitStart: 30, width: 1) | // WRITEMEM supported
             Pack(1, specBitStart: 31, width: 1);  // concatenation supported
         DefineUint(0x0934, RegAccess.ReadOnly, gvcpCapability);
@@ -235,10 +245,33 @@ internal class DeviceState
         // stream channel port 0 (scp0)
         DefineUint(0x0D00, RegAccess.ReadWrite, 0);
 
-        // stream channel packet size 0 (scps0)
+        // stream channel packet size 0 (scps0). the low 16 bits are the size,
+        // bit 0 asks for a test packet and bit 1 sets the ip don't fragment flag
         uint packetSize = 1500;
         DefineUint(0x0D04, RegAccess.ReadWrite, packetSize).OnWrite = (_, v) =>
-            UpdatePayloadSize(PeekUint(0xA000), PeekUint(0xA004), PeekUint(0xA008), ReadU32(v) & 0xFFFF);
+        {
+            uint value = ReadU32(v);
+            uint requested = value & 0xFFFF;
+
+            // spec: a size we cannot serve is rounded to the nearest we can, and
+            // the register has to show what the application will actually get
+            uint granted = Math.Clamp(requested, MinPacketSize, MaxPacketSize);
+
+            ushort status = UpdatePayloadSize(
+                PeekUint(0xA000), PeekUint(0xA004), PeekUint(0xA008), granted);
+            if (status != GVCPStatus.GEV_STATUS_SUCCESS) return status;
+
+            // fire_test_packet is bit 0 in spec numbering and self-clears, so
+            // write back the granted size without it
+            bool fire = (value & 0x80000000) != 0;
+            BinaryPrimitives.WriteUInt32BigEndian(v, (value & 0x7FFF0000) | granted);
+
+            // spec: do not fire when we had to round the size the application asked for
+            if (fire && requested == granted)
+                _fireTestPacket?.Invoke((int)granted);
+
+            return GVCPStatus.GEV_STATUS_SUCCESS;
+        };
 
         // stream channel packet delay 0 (scpd0)
         DefineUint(0x0D08, RegAccess.ReadWrite, 0);
@@ -510,7 +543,8 @@ internal class DeviceState
         if (format is null)
             return GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
 
-        if (packetSize < 576 || packetSize > 16384)
+        // callers clamp before getting here, this only guards the arithmetic below
+        if (packetSize < MinPacketSize || packetSize > MaxPacketSize)
             return GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
 
         ulong payloadSize = (ulong)width * height * (ulong)format.BitsPerPixel / 8;
@@ -591,6 +625,8 @@ internal class DeviceState
     }
 
     public void OnControlChannelClosed(Action hook) => _controlChannelClosed = hook;
+
+    public void OnFireTestPacket(Func<int, ushort> hook) => _fireTestPacket = hook;
 
     // free-running counter in the units the tick frequency register reports
     // we fix that at 1 GHz, so a tick is a nanosecond

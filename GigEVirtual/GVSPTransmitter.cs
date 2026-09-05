@@ -67,10 +67,12 @@ internal class GVSPTransmitter
         if (port == 0 || destinationIP.Equals(IPAddress.Any))
             return GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
 
-        // SCPS0 (packet size)
+        // SCPS0 (packet size). bit 1 in spec numbering asks us to set the ip
+        // don't fragment flag on every stream packet
         _deviceState.ReadRegister(0x0D04, out byte[]? scps0);
-        // packet_size is last two bytes
-        _packetSize = BinaryPrimitives.ReadUInt16BigEndian(scps0.AsSpan(2,2));
+        uint scps = BinaryPrimitives.ReadUInt32BigEndian(scps0);
+        _packetSize = (int)(scps & 0xFFFF);
+        bool doNotFragment = (scps & 0x40000000) != 0;
 
         // SCPD0 (inter-packet delay). the spec measures it in timestamp ticks,
         // and ours are nanoseconds
@@ -94,6 +96,7 @@ internal class GVSPTransmitter
         _udpClient = new(new IPEndPoint(_bindAddress, 0));
         IPEndPoint endpoint = new(destinationIP, port);
         _udpClient.Connect(endpoint);
+        _udpClient.Client.DontFragment = doNotFragment;
         if (OperatingSystem.IsWindows())
         {
             const int SIO_UDP_CONNRESET = -1744830452;
@@ -117,6 +120,59 @@ internal class GVSPTransmitter
         }, TaskContinuationOptions.OnlyOnFaulted);
 
         return GVCPStatus.GEV_STATUS_SUCCESS;
+    }
+
+    // fires one test packet so the application can work out the MTU. it does not
+    // use the usual gvsp layout: an 8 byte header whose block_id is 0 is what
+    // marks it as a test packet, and everything else in that header is ignored.
+    public ushort SendTestPacket(int packetSize)
+    {
+        _deviceState.ReadRegister(0x0D18, out byte[]? scda0);
+        _deviceState.ReadRegister(0x0D00, out byte[]? scp0);
+
+        IPAddress destination = new(scda0!);
+        int port = BinaryPrimitives.ReadUInt16BigEndian(scp0.AsSpan(2, 2));
+
+        // nowhere to send it yet
+        if (port == 0 || destination.Equals(IPAddress.Any))
+            return GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
+
+        // the requested size covers IP header, UDP header, the 8 byte test
+        // packet header and the filler after it
+        int payloadSize = packetSize - 20 - 8 - 8;
+        if (payloadSize < 0) return GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
+
+        byte[] packet = new byte[8 + payloadSize];
+
+        // block_id 0 is the marker. real blocks start at 1, so it cannot collide
+        BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(2, 2), 0);
+
+        FillLfsr(packet.AsSpan(8));
+
+        using var client = new UdpClient(new IPEndPoint(_bindAddress, 0));
+
+        // spec requires the don't fragment bit, otherwise the probe would
+        // succeed at sizes the link cannot actually carry in one piece
+        client.Client.DontFragment = true;
+        client.Send(packet, packet.Length, new IPEndPoint(destination, port));
+
+        Console.WriteLine($"[GVSP] test packet of {packetSize} bytes to {destination}:{port}");
+
+        return GVCPStatus.GEV_STATUS_SUCCESS;
+    }
+
+    // the 16-bit right-shifting LFSR from the spec: initial value 0xFFFF,
+    // polynomial 0x8016, clocked once per output byte. the first byte comes out
+    // as 0xFF, which is what an application checks the payload against.
+    internal static void FillLfsr(Span<byte> data)
+    {
+        ushort lfsr = 0xFFFF;
+
+        for (int i = 0; i < data.Length; i++)
+        {
+            data[i] = (byte)(lfsr & 0xFF);
+            lfsr = (ushort)((lfsr >> 1) ^ (-(lfsr & 1) & 0x8016));
+        }
     }
 
     public ushort StopAcquisition()

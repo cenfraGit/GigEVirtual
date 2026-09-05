@@ -33,6 +33,9 @@ public class GigECamera
 
         // losing the control channel, by release or by heartbeat, aborts streaming
         _deviceState.OnControlChannelClosed(() => _gvspTransmitter.StopAcquisition());
+
+        // an application probes the mtu by asking for test packets through SCPS0
+        _deviceState.OnFireTestPacket(_gvspTransmitter.SendTestPacket);
     }
 
     public Task Start()

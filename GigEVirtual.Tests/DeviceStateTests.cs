@@ -608,15 +608,109 @@ public class DeviceStateTests
     }
 
     [Fact]
-    public void ImplausiblePacketSizeIsRejected()
+    public void ImplausiblePacketSizeIsRoundedRatherThanRefused()
     {
         DeviceState state = Controlled();
 
-        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_PARAMETER, state.WriteRegister(Controller, 0x0D04, U32(0)));
+        // spec: round to the nearest size we support and show that in the register
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0D04, U32(0)));
+        Assert.Equal(576u, PacketSize(state));
 
-        // packet_size is the low 16 bits of SCPS0, so 0xFFFF is the largest a
-        // client can even ask for, and it is still well past a jumbo frame
-        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_PARAMETER, state.WriteRegister(Controller, 0x0D04, U32(0xFFFF)));
+        // packet_size is the low 16 bits, so 0xFFFF is the largest an application
+        // can even ask for, and it is still well past a jumbo frame
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0D04, U32(0xFFFF)));
+        Assert.Equal(16384u, PacketSize(state));
+    }
+
+    // --------------------------------------------------------------- test packet
+
+    // fire_test_packet is bit 0 and do_not_fragment is bit 1, in spec numbering
+    private const uint FireTestPacket = 0x80000000;
+    private const uint DoNotFragment = 0x40000000;
+
+    private static uint PacketSize(DeviceState state)
+    {
+        state.ReadRegister(0x0D04, out byte[]? value);
+        return ReadU32(value!) & 0xFFFF;
+    }
+
+    [Fact]
+    public void AskingForATestPacketFiresOne()
+    {
+        DeviceState state = Controlled();
+
+        var fired = new List<int>();
+        state.OnFireTestPacket(size => { fired.Add(size); return GVCPStatus.GEV_STATUS_SUCCESS; });
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS,
+            state.WriteRegister(Controller, 0x0D04, U32(FireTestPacket | DoNotFragment | 1500)));
+
+        Assert.Equal([1500], fired);
+    }
+
+    [Fact]
+    public void SettingTheSizeWithoutTheFireBitSendsNothing()
+    {
+        DeviceState state = Controlled();
+
+        var fired = new List<int>();
+        state.OnFireTestPacket(size => { fired.Add(size); return GVCPStatus.GEV_STATUS_SUCCESS; });
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS,
+            state.WriteRegister(Controller, 0x0D04, U32(DoNotFragment | 1500)));
+
+        Assert.Empty(fired);
+    }
+
+    [Fact]
+    public void NoTestPacketWhenTheSizeHadToBeRounded()
+    {
+        DeviceState state = Controlled();
+
+        var fired = new List<int>();
+        state.OnFireTestPacket(size => { fired.Add(size); return GVCPStatus.GEV_STATUS_SUCCESS; });
+
+        // spec: a transmitter that cannot serve the requested size must not fire
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS,
+            state.WriteRegister(Controller, 0x0D04, U32(FireTestPacket | 100)));
+
+        Assert.Empty(fired);
+        Assert.Equal(576u, PacketSize(state));
+    }
+
+    [Fact]
+    public void FireBitSelfClearsButTheOtherBitsStay()
+    {
+        DeviceState state = Controlled();
+        state.OnFireTestPacket(_ => GVCPStatus.GEV_STATUS_SUCCESS);
+
+        state.WriteRegister(Controller, 0x0D04, U32(FireTestPacket | DoNotFragment | 1500));
+
+        state.ReadRegister(0x0D04, out byte[]? value);
+        uint scps = ReadU32(value!);
+
+        Assert.Equal(0u, scps & FireTestPacket);
+        Assert.Equal(DoNotFragment, scps & DoNotFragment);
+        Assert.Equal(1500u, scps & 0xFFFF);
+    }
+
+    [Fact]
+    public void TestPacketDataFollowsTheSpecsLfsr()
+    {
+        const int period = 65535; // a maximal 16-bit lfsr, so 2^16 - 1
+
+        // one full period plus a couple of bytes, so we can see it wrap
+        byte[] data = new byte[period + 2];
+        GVSPTransmitter.FillLfsr(data);
+
+        // spec: the first byte is the lsb of the initial value
+        Assert.Equal(0xFF, data[0]);
+
+        Assert.Equal(data[0], data[period]);
+        Assert.Equal(data[1], data[period + 1]);
+
+        // and it is genuinely varying, not stuck on one value
+        Assert.True(data.Take(256).Distinct().Count() > 100);
     }
 
     [Fact]
