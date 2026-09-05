@@ -17,4 +17,8 @@
     <InternalsVisibleTo Include="GigEVirtual.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="SixLabors.ImageSharp" Version="2.1.11" />
+  </ItemGroup>
+
 </Project>
