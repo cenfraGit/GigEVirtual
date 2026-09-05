@@ -100,7 +100,13 @@ internal class GVSPTransmitter
         Console.WriteLine($"[GVSP] StartAcquisition: dest={destinationIP}:{port}, packetSize={_packetSize}");
 
         _cts = new();
-        _ = Stream(_cts.Token).ContinueWith(t =>
+
+        // Task.Run, not a bare call: an async method runs inline until its first
+        // await, and Stream only awaits at the end of a block. calling it
+        // directly would send a whole frame on the GVCP thread before we get to
+        // acknowledge the write that started acquisition
+        CancellationToken token = _cts.Token;
+        _ = Task.Run(() => Stream(token)).ContinueWith(t =>
         {
             if (t.Exception is not null)
                 Console.WriteLine(t.Exception.GetBaseException());

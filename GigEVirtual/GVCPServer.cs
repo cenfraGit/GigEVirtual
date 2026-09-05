@@ -25,6 +25,12 @@ internal class GVCPServer
     private UdpClient? _udpClient;
     bool _shareToNetwork = false;
 
+    // the last command answered per application. an application that does not
+    // get our acknowledge retransmits with the same req_id, and re-running the
+    // command would be wrong: starting acquisition twice answers BUSY when the
+    // application is still waiting to hear that the first one worked.
+    private readonly Dictionary<IPEndPoint, (ushort ReqId, Ack Ack)> _lastAck = [];
+
     // shared discovery
     private static readonly List<GVCPServer> _instances = [];
     private static readonly object _instancesLock = new();
@@ -179,7 +185,7 @@ internal class GVCPServer
                 PrintConsole($"SENT to  {result.RemoteEndPoint,-21}: " +
                 $"{GVCPMessages.GetName(ack.Message)} (0x{ack.Message:X4}) " +
                 $"{GVCPStatus.GetName(ack.Status)} (0x{ack.Status:X4}) " +
-                $"length={ack.Buffer.Length - 8}"); // buffer contains header already
+                $"length={BinaryPrimitives.ReadUInt16BigEndian(ack.Buffer.AsSpan(4, 2))}"); // the declared one, not the buffer
 
             // the spec always defines the acknowledge value as the command value + 1
             ushort ackMessage = (ushort)(command + 1);
@@ -199,10 +205,31 @@ internal class GVCPServer
                 continue;
             }
 
+            // the shared 0.0.0.0 listener answers discovery on behalf of every
+            // device, and it receives the same broadcasts this socket does.
+            // answering here too would mean two acks, or worse the
+            // NOT_IMPLEMENTED this loop gives anything it does not handle.
+            if (command == GVCPMessages.DISCOVERY_CMD)
+                continue;
+
             PrintConsole($"CMD from {result.RemoteEndPoint,-21}: " +
                 $"{GVCPMessages.GetName(command)} (0x{command:X4}) " +
                 $"length={length} " +
                 $"req_id={req_id}");
+
+            // a repeated req_id from the same application means our answer never
+            // arrived. send it again rather than running the command a second time
+            if (_lastAck.TryGetValue(result.RemoteEndPoint, out var previous) && previous.ReqId == req_id)
+            {
+                PrintConsole($"Retransmission of req_id={req_id}, replaying the previous ack");
+
+                if (acknowledgeRequired)
+                {
+                    await _udpClient.SendAsync(previous.Ack.Buffer, previous.Ack.Buffer.Length, result.RemoteEndPoint);
+                    PrintAck(previous.Ack);
+                }
+                continue;
+            }
 
             // spec: a valid command from the primary application resets the
             // heartbeat. DISCOVERY, FORCEIP, PACKETRESEND and ACTION are excluded,
@@ -304,6 +331,11 @@ internal class GVCPServer
                     ack = BuildErrorAck(req_id, ackMessage, GVCPStatus.GEV_STATUS_NOT_IMPLEMENTED);
                     break;
             }
+
+            // keep it even when no ack was requested, so a retransmission that
+            // does ask for one still gets the right answer
+            if (_lastAck.Count > 32) _lastAck.Clear();
+            _lastAck[result.RemoteEndPoint] = (req_id, ack);
 
             if (acknowledgeRequired)
             {
@@ -605,6 +637,8 @@ internal class GVCPServer
         ushort status = _deviceState.ReadMemory(sender, address, count, out byte[]? value);
         if (status == GVCPStatus.GEV_STATUS_SUCCESS)
             Array.Copy(value!, 0, ack, offset, value!.Length);
+        else
+            Array.Resize(ref ack, 8); // spec wants no payload at all on failure
 
         // ------------------------------------------ header
 
