@@ -141,7 +141,7 @@ internal class GVSPTransmitter
             _packet_id = 0;
 
             // one frame per block
-            byte[] frame = _imageSource.NextFrame(_width, _height);
+            byte[] frame = _imageSource.NextFrame(_width, _height, _pixelFormat);
 
             // build leader
             byte[] leader = BuildDataLeader();

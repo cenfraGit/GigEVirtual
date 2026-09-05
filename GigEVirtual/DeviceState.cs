@@ -506,14 +506,14 @@ internal class DeviceState
         if (width < 64 || width % 4 != 0 || height < 1)
             return GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
 
-        if (pixelFormat != GVSPPixelFormats.Mono8)
+        PixelFormat? format = GVSPPixelFormats.Find(pixelFormat);
+        if (format is null)
             return GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
 
         if (packetSize < 576 || packetSize > 16384)
             return GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
 
-        int bytesPerPixel = 1; // Mono8
-        ulong payloadSize = (ulong)width * height * (ulong)bytesPerPixel;
+        ulong payloadSize = (ulong)width * height * (ulong)format.BitsPerPixel / 8;
 
         PokeUint(0x0D34, (uint)(payloadSize >> 32));
         PokeUint(0x0D38, (uint)(payloadSize & 0xFFFFFFFF));

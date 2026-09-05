@@ -77,6 +77,70 @@
 			<Description>Mono8: Monochrome 8-Bit</Description>
 			<Value>0x01080001</Value>
 		</EnumEntry>
+		<EnumEntry Name="Mono10" NameSpace="Standard">
+			<Description>Mono10: Monochrome 10-Bit unpacked</Description>
+			<Value>0x01100003</Value>
+		</EnumEntry>
+		<EnumEntry Name="Mono12" NameSpace="Standard">
+			<Description>Mono12: Monochrome 12-Bit unpacked</Description>
+			<Value>0x01100005</Value>
+		</EnumEntry>
+		<EnumEntry Name="Mono16" NameSpace="Standard">
+			<Description>Mono16: Monochrome 16-Bit</Description>
+			<Value>0x01100007</Value>
+		</EnumEntry>
+		<EnumEntry Name="BayerGR8" NameSpace="Standard">
+			<Description>BayerGR8: 8-Bit Bayer GRBG</Description>
+			<Value>0x01080008</Value>
+		</EnumEntry>
+		<EnumEntry Name="BayerRG8" NameSpace="Standard">
+			<Description>BayerRG8: 8-Bit Bayer RGGB</Description>
+			<Value>0x01080009</Value>
+		</EnumEntry>
+		<EnumEntry Name="BayerGB8" NameSpace="Standard">
+			<Description>BayerGB8: 8-Bit Bayer GBRG</Description>
+			<Value>0x0108000A</Value>
+		</EnumEntry>
+		<EnumEntry Name="BayerBG8" NameSpace="Standard">
+			<Description>BayerBG8: 8-Bit Bayer BGGR</Description>
+			<Value>0x0108000B</Value>
+		</EnumEntry>
+		<EnumEntry Name="BayerGR10" NameSpace="Standard">
+			<Description>BayerGR10: 10-Bit Bayer GRBG unpacked</Description>
+			<Value>0x0110000C</Value>
+		</EnumEntry>
+		<EnumEntry Name="BayerRG10" NameSpace="Standard">
+			<Description>BayerRG10: 10-Bit Bayer RGGB unpacked</Description>
+			<Value>0x0110000D</Value>
+		</EnumEntry>
+		<EnumEntry Name="BayerGB10" NameSpace="Standard">
+			<Description>BayerGB10: 10-Bit Bayer GBRG unpacked</Description>
+			<Value>0x0110000E</Value>
+		</EnumEntry>
+		<EnumEntry Name="BayerBG10" NameSpace="Standard">
+			<Description>BayerBG10: 10-Bit Bayer BGGR unpacked</Description>
+			<Value>0x0110000F</Value>
+		</EnumEntry>
+		<EnumEntry Name="BayerGR12" NameSpace="Standard">
+			<Description>BayerGR12: 12-Bit Bayer GRBG unpacked</Description>
+			<Value>0x01100010</Value>
+		</EnumEntry>
+		<EnumEntry Name="BayerRG12" NameSpace="Standard">
+			<Description>BayerRG12: 12-Bit Bayer RGGB unpacked</Description>
+			<Value>0x01100011</Value>
+		</EnumEntry>
+		<EnumEntry Name="BayerGB12" NameSpace="Standard">
+			<Description>BayerGB12: 12-Bit Bayer GBRG unpacked</Description>
+			<Value>0x01100012</Value>
+		</EnumEntry>
+		<EnumEntry Name="BayerBG12" NameSpace="Standard">
+			<Description>BayerBG12: 12-Bit Bayer BGGR unpacked</Description>
+			<Value>0x01100013</Value>
+		</EnumEntry>
+		<EnumEntry Name="RGB8" NameSpace="Standard">
+			<Description>RGB8: 8-Bit RGB</Description>
+			<Value>0x02180014</Value>
+		</EnumEntry>
 		<pValue>PixelFormatReg</pValue>
 	</Enumeration>
 
@@ -144,11 +208,16 @@
 		<Endianess>BigEndian</Endianess>
 	</IntReg>
 
-	<IntSwissKnife Name="PayloadSizeVal">
-		<pVariable Name="WIDTH">Width</pVariable>
-		<pVariable Name="HEIGHT">Height</pVariable>
-		<Formula>WIDTH * HEIGHT</Formula>
-	</IntSwissKnife>
+	<IntReg Name="PayloadSizeVal">
+		<Description>Payload size in bytes, as computed by the device.</Description>
+		<Visibility>Invisible</Visibility>
+		<Address>0x0D38</Address>
+		<Length>4</Length>
+		<AccessMode>RO</AccessMode>
+		<pPort>Device</pPort>
+		<Sign>Unsigned</Sign>
+		<Endianess>BigEndian</Endianess>
+	</IntReg>
 
 	<Integer Name="PayloadSize" NameSpace="Standard">
 		<Description>Number of bytes transferred for each image block.</Description>

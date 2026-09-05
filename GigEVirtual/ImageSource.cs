@@ -26,6 +26,7 @@ internal class ImageSource
     // the last frame we converted. a single image would otherwise be decoded
     // again for every block we send.
     private byte[]? _cached;
+    private uint _cachedFormat;
     private int _cachedFile = -1;
     private int _cachedWidth;
     private int _cachedHeight;
@@ -61,54 +62,126 @@ internal class ImageSource
 
     // --------------------------------------------------------------- methods
 
-    // one mono8 frame, scaled to the size the device is currently reporting.
-    // advances to the next file when there is more than one.
-    public byte[] NextFrame(int width, int height)
+    // one frame in the format the device is currently reporting, scaled to the
+    // size it reports. advances to the next file when there is more than one.
+    public byte[] NextFrame(int width, int height, uint pixelFormat = GVSPPixelFormats.Mono8)
     {
+        PixelFormat format = GVSPPixelFormats.Find(pixelFormat)
+            ?? throw new NotSupportedException($"pixel format 0x{pixelFormat:X8} is not supported");
+
         byte[] frame = _files.Length == 0
-            ? BuildPattern(width, height)
-            : LoadFile(_frameNumber % _files.Length, width, height);
+            ? BuildPattern(width, height, format)
+            : LoadFile(_frameNumber % _files.Length, width, height, format);
 
         _frameNumber++;
         return frame;
     }
 
-    private byte[] LoadFile(int fileIndex, int width, int height)
+    private byte[] LoadFile(int fileIndex, int width, int height, PixelFormat format)
     {
-        if (_cached is not null && _cachedFile == fileIndex &&
+        if (_cached is not null && _cachedFile == fileIndex && _cachedFormat == format.Id &&
             _cachedWidth == width && _cachedHeight == height)
             return _cached;
 
-        // L8 is 8 bits of luminance per pixel, so ImageSharp does the greyscale
-        // conversion for us if the file is colour
-        using Image<L8> image = Image.Load<L8>(_files[fileIndex]);
+        using Image<Rgb24> image = Image.Load<Rgb24>(_files[fileIndex]);
         image.Mutate(x => x.Resize(width, height));
 
-        byte[] frame = new byte[width * height];
-        image.CopyPixelDataTo(frame);
+        byte[] frame = Convert(image, width, height, format);
 
         _cached = frame;
         _cachedFile = fileIndex;
+        _cachedFormat = format.Id;
         _cachedWidth = width;
         _cachedHeight = height;
 
         return frame;
     }
 
+    // lays the decoded image out the way the pixel format wants it
+    private static byte[] Convert(Image<Rgb24> image, int width, int height, PixelFormat format)
+    {
+        // rgb is already interleaved the way the wire wants it
+        if (format.Id == GVSPPixelFormats.RGB8)
+        {
+            byte[] rgb = new byte[width * height * 3];
+            image.CopyPixelDataTo(rgb);
+            return rgb;
+        }
+
+        byte[] frame = new byte[width * height * format.BitsPerPixel / 8];
+
+        image.ProcessPixelRows(accessor =>
+        {
+            for (int y = 0; y < height; y++)
+            {
+                Span<Rgb24> row = accessor.GetRowSpan(y);
+
+                for (int x = 0; x < width; x++)
+                {
+                    Rgb24 pixel = row[x];
+
+                    // a bayer sensor only measures one component per pixel, so
+                    // pick the one this position sits under. otherwise luminance.
+                    byte sample = format.Bayer is null
+                        ? Luma(pixel)
+                        : format.Bayer[(y % 2) * 2 + (x % 2)] switch
+                        {
+                            'R' => pixel.R,
+                            'G' => pixel.G,
+                            _ => pixel.B,
+                        };
+
+                    Write(frame, (y * width + x), sample, format);
+                }
+            }
+        });
+
+        return frame;
+    }
+
+    // our source is 8 bits, so spread it across the format's full range
+    private static void Write(byte[] frame, int index, byte sample, PixelFormat format)
+    {
+        int value = sample * ((1 << format.Depth) - 1) / 255;
+
+        if (format.BitsPerPixel == 8)
+        {
+            frame[index] = (byte)value;
+            return;
+        }
+
+        // spec says multi-byte pixel data is little-endian, the opposite of the
+        // gvsp headers around it
+        frame[index * 2] = (byte)value;
+        frame[index * 2 + 1] = (byte)(value >> 8);
+    }
+
+    private static byte Luma(Rgb24 pixel) =>
+        (byte)((pixel.R * 299 + pixel.G * 587 + pixel.B * 114) / 1000);
+
     // checkerboard that shifts every frame, so it is obvious from the client
     // whether blocks are actually arriving
-    private byte[] BuildPattern(int width, int height)
+    private byte[] BuildPattern(int width, int height, PixelFormat format)
     {
         const int square = 32;
         int shift = _frameNumber * 4;
 
-        byte[] frame = new byte[width * height];
+        using var image = new Image<Rgb24>(width, height);
 
-        for (int y = 0; y < height; y++)
-            for (int x = 0; x < width; x++)
-                frame[y * width + x] =
-                    ((x + shift) / square + y / square) % 2 == 0 ? (byte)200 : (byte)40;
+        image.ProcessPixelRows(accessor =>
+        {
+            for (int y = 0; y < height; y++)
+            {
+                Span<Rgb24> row = accessor.GetRowSpan(y);
 
-        return frame;
+                for (int x = 0; x < width; x++)
+                {
+                    byte v = ((x + shift) / square + y / square) % 2 == 0 ? (byte)200 : (byte)40;
+                    row[x] = new Rgb24(v, v, v);
+                }
+            }
+        });
+
+        return Convert(image, width, height, format);
     }
 }

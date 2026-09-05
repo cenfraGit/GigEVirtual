@@ -552,11 +552,33 @@ public class DeviceStateTests
     {
         DeviceState state = Controlled();
 
+        // Mono12Packed. a real format, but we do not do bit packing
         Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_PARAMETER,
-            state.WriteRegister(Controller, 0xA008, U32(0x02180014))); // RGB8
+            state.WriteRegister(Controller, 0xA008, U32(0x010C0006)));
 
         state.ReadRegister(0xA008, out byte[]? format);
         Assert.Equal(GVSPPixelFormats.Mono8, ReadU32(format!));
+    }
+
+    [Fact]
+    public void PayloadSizeFollowsTheBitsPerPixel()
+    {
+        DeviceState state = Controlled();
+
+        Assert.Equal(640u * 480u, PayloadSize(state));
+
+        // Mono12 rides in a 16-bit container, so two bytes per pixel
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS,
+            state.WriteRegister(Controller, 0xA008, U32(GVSPPixelFormats.Mono12)));
+        Assert.Equal(640u * 480u * 2, PayloadSize(state));
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS,
+            state.WriteRegister(Controller, 0xA008, U32(GVSPPixelFormats.RGB8)));
+        Assert.Equal(640u * 480u * 3, PayloadSize(state));
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS,
+            state.WriteRegister(Controller, 0xA008, U32(GVSPPixelFormats.BayerRG8)));
+        Assert.Equal(640u * 480u, PayloadSize(state));
     }
 
     [Fact]
