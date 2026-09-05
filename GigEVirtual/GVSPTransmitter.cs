@@ -11,14 +11,22 @@ using System.Net.Sockets;
 
 namespace GigEVirtual;
 
-// where a device keeps what the transmitter needs to know. delegates rather than
-// addresses, because a device is free to place these registers anywhere, store
-// them in either byte order, and hold the frame rate as whatever type suits it.
-internal record StreamGeometry(
+// everything the transmitter asks its device. delegates rather than addresses,
+// because a device is free to place these registers anywhere, store them in
+// either byte order, and hold a value as whatever type suits it.
+//
+// the four required ones every device has to answer. the rest have defaults that
+// describe a plain free-running camera, so a device only states what differs.
+internal record StreamSettings(
     Func<int> Width,
     Func<int> Height,
     Func<uint> PixelFormat,
-    Func<float> FrameRate);
+    Func<float> FrameRate)
+{
+    // how much light the sensor collected relative to its normal exposure. 1 is
+    // unchanged, above brightens, below darkens.
+    public Func<float> Brightness { get; init; } = () => 1.0f;
+}
 
 internal class GVSPTransmitter
 {
@@ -50,17 +58,17 @@ internal class GVSPTransmitter
     private const int gvspHeaderSize = 20;
 
     private ImageSource _imageSource;
-    private StreamGeometry _geometry;
+    private StreamSettings _settings;
 
     // --------------------------------------------------------------- constructors
 
     public GVSPTransmitter(DeviceState deviceState, IPAddress bindAddress,
-                           ImageSource imageSource, StreamGeometry geometry)
+                           ImageSource imageSource, StreamSettings settings)
     {
         _deviceState = deviceState;
         _bindAddress = bindAddress;
         _imageSource = imageSource;
-        _geometry = geometry;
+        _settings = settings;
     }
 
     // --------------------------------------------------------------- methods
@@ -100,9 +108,9 @@ internal class GVSPTransmitter
 
         // geometry is fixed for the run: an application cannot change the shape
         // of a transfer that is already going
-        _width = _geometry.Width();
-        _height = _geometry.Height();
-        _pixelFormat = _geometry.PixelFormat();
+        _width = _settings.Width();
+        _height = _settings.Height();
+        _pixelFormat = _settings.PixelFormat();
 
         // udp connection
         _udpClient = new(new IPEndPoint(_bindAddress, 0));
@@ -235,7 +243,8 @@ internal class GVSPTransmitter
             _packet_id = 0;
 
             // one frame per block
-            byte[] frame = _imageSource.NextFrame(_width, _height, _pixelFormat);
+            byte[] frame = _imageSource.NextFrame(_width, _height, _pixelFormat,
+                                                  _settings.Brightness());
 
             // build leader
             byte[] leader = BuildDataLeader();
@@ -264,7 +273,7 @@ internal class GVSPTransmitter
             _block_id++;
 
             // read every block, so an application can change it while streaming
-            float frameRate = _geometry.FrameRate();
+            float frameRate = _settings.FrameRate();
 
             nextBlockAt += (long)(Stopwatch.Frequency / frameRate);
 

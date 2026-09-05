@@ -11,6 +11,8 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using GigEVirtual;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
 using Xunit;
 
 namespace GigEVirtual.Tests;
@@ -25,6 +27,7 @@ public class GenieNanoTests : IDisposable
     private const uint PixelFormat = 0x20000060;
     private const uint FrameRate = 0x200000B0;
     private const uint ExposureTime = 0x20004BFC;
+    private const uint Gain = 0x20001530;
 
     private readonly string _dir;
     private readonly string _xmlPath;
@@ -133,7 +136,7 @@ public class GenieNanoTests : IDisposable
         Assert.Equal(30_000u, _state.ReadUint(FrameRate)); // 30 Hz
 
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(FrameRate, 12_500));
-        Assert.Equal(12.5f, GenieNano.Geometry(_state).FrameRate());
+        Assert.Equal(12.5f, GenieNano.Settings(_state).FrameRate());
     }
 
     [Fact]
@@ -144,6 +147,54 @@ public class GenieNanoTests : IDisposable
 
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ExposureTime, 5_000));
         Assert.Equal(5_000u, _state.ReadUint(ExposureTime));
+    }
+
+    // --------------------------------------------------------------- exposure and gain
+
+    [Fact]
+    public void BrightnessIsUnchangedAtTheDefaults()
+    {
+        Assert.Equal(1.0f, GenieNano.Brightness(_state), 3);
+    }
+
+    [Fact]
+    public void ExposingLongerBrightensAndShorterDarkens()
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ExposureTime, 20_000));
+        Assert.Equal(2.0f, GenieNano.Brightness(_state), 3);
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ExposureTime, 5_000));
+        Assert.Equal(0.5f, GenieNano.Brightness(_state), 3);
+    }
+
+    [Fact]
+    public void GainAmplifiesOnTopOfExposure()
+    {
+        // the description stores gain as 200 * log10(factor), so 200 is ten times
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(Gain, 200));
+        Assert.Equal(10.0f, GenieNano.Brightness(_state), 2);
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ExposureTime, 5_000));
+        Assert.Equal(5.0f, GenieNano.Brightness(_state), 2);
+    }
+
+    [Fact]
+    public void BrightnessReachesTheFrame()
+    {
+        // a flat grey image, so every pixel answers the same question. the
+        // generated pattern would not do: it moves between frames.
+        string path = Path.Combine(_dir, "grey.png");
+        using (var image = new Image<L8>(16, 16, new L8(100)))
+            image.SaveAsPng(path);
+
+        var source = new ImageSource(path);
+
+        Assert.Equal(100, source.NextFrame(16, 16, GVSPPixelFormats.Mono8, 1.0f)[0]);
+        Assert.Equal(50, source.NextFrame(16, 16, GVSPPixelFormats.Mono8, 0.5f)[0]);
+        Assert.Equal(200, source.NextFrame(16, 16, GVSPPixelFormats.Mono8, 2.0f)[0]);
+
+        // a real sensor saturates rather than wrapping round
+        Assert.Equal(255, source.NextFrame(16, 16, GVSPPixelFormats.Mono8, 8.0f)[0]);
     }
 
     // --------------------------------------------------------------- the description
@@ -181,7 +232,7 @@ public class GenieNanoTests : IDisposable
         int port = ((IPEndPoint)receiver.Client.LocalEndPoint!).Port;
 
         var transmitter = new GVSPTransmitter(_state, IPAddress.Loopback, new ImageSource(),
-                                              GenieNano.Geometry(_state));
+                                              GenieNano.Settings(_state));
 
         Write(Width, 64);
         Write(Height, 48);

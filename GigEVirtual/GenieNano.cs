@@ -41,6 +41,7 @@ public class GenieNano : GigEDevice
     private const uint TriggerDelay = 0x200010C0; // microseconds
     private const uint TriggerSoftware = 0x20001100;
     private const uint ExposureTime = 0x20004BFC; // microseconds
+    private const uint Gain = 0x20001530;         // 200 * log10(factor)
 
     // the description reaches 0xB0000000, so the blob sits clear of all of it
     private const uint XmlAddress = 0xF0000000;
@@ -52,6 +53,14 @@ public class GenieNano : GigEDevice
     private const uint MaxFrameRate = 1000 * MilliHertz;
     private const uint MinExposure = 1;
     private const uint MaxExposure = 2_000_000;   // 2 s, matching the trigger delay range
+
+    // what the image on disk is taken to already represent. exposing longer than
+    // this brightens the frame, shorter darkens it.
+    private const float ReferenceExposure = 10_000f;
+
+    // the description converts a gain factor to the register with 200*log10, so
+    // going back is a power of ten. 0 means unity gain.
+    private const uint MaxGain = 800;             // 200 * log10(10000)
 
     // --------------------------------------------------------------- construction
 
@@ -66,7 +75,7 @@ public class GenieNano : GigEDevice
     }
 
     private GenieNano(DeviceState state, string ip, string? imagePath, bool shareToNetwork)
-        : base(ip, state, Geometry(state), imagePath, shareToNetwork)
+        : base(ip, state, Settings(state), imagePath, shareToNetwork)
     {
         state.OnWrite(AcquisitionStart, (_, _) => Transmitter.StartAcquisition());
         state.OnWrite(AcquisitionStop, (_, _) => Transmitter.StopAcquisition());
@@ -121,8 +130,10 @@ public class GenieNano : GigEDevice
         Define(state, FrameRate, 30 * MilliHertz, (_, v) =>
             InRange(Read(v), MinFrameRate, MaxFrameRate));
 
-        Define(state, ExposureTime, 10_000, (_, v) =>
+        Define(state, ExposureTime, (uint)ReferenceExposure, (_, v) =>
             InRange(Read(v), MinExposure, MaxExposure));
+
+        Define(state, Gain, 0, (_, v) => InRange(Read(v), 0, MaxGain));
 
         // commands, which the device clears again once they have run
         Define(state, AcquisitionStart, 0, selfClearing: true);
@@ -166,11 +177,24 @@ public class GenieNano : GigEDevice
         return state.RecomputePayload(w, h, pixelFormat ?? state.ReadUint(PixelFormat));
     }
 
-    internal static StreamGeometry Geometry(DeviceState state) => new(
+    internal static StreamSettings Settings(DeviceState state) => new(
         Width: () => (int)state.ReadUint(Width),
         Height: () => (int)state.ReadUint(Height),
         PixelFormat: () => state.ReadUint(PixelFormat),
-        FrameRate: () => state.ReadUint(FrameRate) / (float)MilliHertz);
+        FrameRate: () => state.ReadUint(FrameRate) / (float)MilliHertz)
+    {
+        Brightness = () => Brightness(state),
+    };
+
+    // a sensor collects light in proportion to how long it is exposed, and gain
+    // amplifies whatever it collected
+    internal static float Brightness(DeviceState state)
+    {
+        float exposure = state.ReadUint(ExposureTime) / ReferenceExposure;
+        float gain = MathF.Pow(10f, state.ReadUint(Gain) / 200f);
+
+        return exposure * gain;
+    }
 
     private static uint Read(byte[] value) => BinaryPrimitives.ReadUInt32LittleEndian(value);
 }

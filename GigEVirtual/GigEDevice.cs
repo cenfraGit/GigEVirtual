@@ -22,7 +22,7 @@ public abstract class GigEDevice
     // hands both here along with a description of where its geometry lives.
     private protected GigEDevice(string ip,
                                  DeviceState state,
-                                 StreamGeometry geometry,
+                                 StreamSettings settings,
                                  string? imagePath,
                                  bool shareToNetwork)
     {
@@ -30,7 +30,7 @@ public abstract class GigEDevice
 
         IPAddress address = IPAddress.Parse(ip);
 
-        Transmitter = new GVSPTransmitter(state, address, new ImageSource(imagePath), geometry);
+        Transmitter = new GVSPTransmitter(state, address, new ImageSource(imagePath), settings);
         _server = new GVCPServer(address, state, shareToNetwork);
 
         // the same three seams for every device, so a device only has to wire up

@@ -27,6 +27,7 @@ internal class ImageSource
     // again for every block we send.
     private byte[]? _cached;
     private uint _cachedFormat;
+    private float _cachedBrightness;
     private int _cachedFile = -1;
     private int _cachedWidth;
     private int _cachedHeight;
@@ -64,31 +65,33 @@ internal class ImageSource
 
     // one frame in the format the device is currently reporting, scaled to the
     // size it reports. advances to the next file when there is more than one.
-    public byte[] NextFrame(int width, int height, uint pixelFormat = GVSPPixelFormats.Mono8)
+    public byte[] NextFrame(int width, int height, uint pixelFormat = GVSPPixelFormats.Mono8,
+                            float brightness = 1.0f)
     {
         PixelFormat format = GVSPPixelFormats.Find(pixelFormat)
             ?? throw new NotSupportedException($"pixel format 0x{pixelFormat:X8} is not supported");
 
         byte[] frame = _files.Length == 0
-            ? BuildPattern(width, height, format)
-            : LoadFile(_frameNumber % _files.Length, width, height, format);
+            ? BuildPattern(width, height, format, brightness)
+            : LoadFile(_frameNumber % _files.Length, width, height, format, brightness);
 
         _frameNumber++;
         return frame;
     }
 
-    private byte[] LoadFile(int fileIndex, int width, int height, PixelFormat format)
+    private byte[] LoadFile(int fileIndex, int width, int height, PixelFormat format, float brightness)
     {
         if (_cached is not null && _cachedFile == fileIndex && _cachedFormat == format.Id &&
-            _cachedWidth == width && _cachedHeight == height)
+            _cachedWidth == width && _cachedHeight == height && _cachedBrightness == brightness)
             return _cached;
 
         using Image<Rgb24> image = Image.Load<Rgb24>(_files[fileIndex]);
         image.Mutate(x => x.Resize(width, height));
 
-        byte[] frame = Convert(image, width, height, format);
+        byte[] frame = Convert(image, width, height, format, brightness);
 
         _cached = frame;
+        _cachedBrightness = brightness;
         _cachedFile = fileIndex;
         _cachedFormat = format.Id;
         _cachedWidth = width;
@@ -98,13 +101,16 @@ internal class ImageSource
     }
 
     // lays the decoded image out the way the pixel format wants it
-    private static byte[] Convert(Image<Rgb24> image, int width, int height, PixelFormat format)
+    private static byte[] Convert(Image<Rgb24> image, int width, int height,
+                                  PixelFormat format, float brightness)
     {
         // rgb is already interleaved the way the wire wants it
         if (format.Id == GVSPPixelFormats.RGB8)
         {
             byte[] rgb = new byte[width * height * 3];
             image.CopyPixelDataTo(rgb);
+
+            for (int i = 0; i < rgb.Length; i++) rgb[i] = Scale(rgb[i], brightness);
             return rgb;
         }
 
@@ -131,7 +137,7 @@ internal class ImageSource
                             _ => pixel.B,
                         };
 
-                    Write(frame, (y * width + x), sample, format);
+                    Write(frame, (y * width + x), Scale(sample, brightness), format);
                 }
             }
         });
@@ -156,12 +162,22 @@ internal class ImageSource
         frame[index * 2 + 1] = (byte)(value >> 8);
     }
 
+    // more or less light than the sensor's normal exposure. clips at full scale
+    // rather than wrapping round, the way a real sensor saturates.
+    private static byte Scale(byte sample, float brightness)
+    {
+        if (brightness == 1.0f) return sample;
+
+        float scaled = sample * brightness;
+        return scaled >= 255f ? (byte)255 : (byte)scaled;
+    }
+
     private static byte Luma(Rgb24 pixel) =>
         (byte)((pixel.R * 299 + pixel.G * 587 + pixel.B * 114) / 1000);
 
     // checkerboard that shifts every frame, so it is obvious from the client
     // whether blocks are actually arriving
-    private byte[] BuildPattern(int width, int height, PixelFormat format)
+    private byte[] BuildPattern(int width, int height, PixelFormat format, float brightness)
     {
         const int square = 32;
         int shift = _frameNumber * 4;
@@ -182,6 +198,6 @@ internal class ImageSource
             }
         });
 
-        return Convert(image, width, height, format);
+        return Convert(image, width, height, format, brightness);
     }
 }

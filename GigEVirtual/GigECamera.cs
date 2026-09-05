@@ -45,7 +45,7 @@ public class GigECamera : GigEDevice
     }
 
     private GigECamera(DeviceState state, string ip, string? imagePath, bool shareToNetwork)
-        : base(ip, state, Geometry(state), imagePath, shareToNetwork)
+        : base(ip, state, Settings(state), imagePath, shareToNetwork)
     {
         // these need the transmitter, so they cannot be wired until the base has
         // built one. everything else about the registers is already in place.
@@ -115,7 +115,7 @@ public class GigECamera : GigEDevice
         return state.RecomputePayload(w, h, pixelFormat ?? state.ReadUint(PixelFormat));
     }
 
-    internal static StreamGeometry Geometry(DeviceState state) => new(
+    internal static StreamSettings Settings(DeviceState state) => new(
         Width: () => (int)state.ReadUint(Width),
         Height: () => (int)state.ReadUint(Height),
         PixelFormat: () => state.ReadUint(PixelFormat),
