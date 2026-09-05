@@ -95,15 +95,16 @@ public class GenICamXmlTests
     }
 
     [Fact]
-    public void SkipsARegisterWhoseAddressComesFromASelector()
+    public void ASelectorDrivenAddressExistsAtEveryOptionItLists()
     {
-        // the address depends on whatever the selector currently reads, so it is
-        // only knowable at runtime. a device declares these by hand.
+        // which one the selector points at is only knowable at runtime, so define
+        // the register at all of them rather than evaluate the selector
         List<XmlRegister> registers = Read("""
             <Integer Name="TempAddr">
                 <pIndex>temperatureSelector</pIndex>
                 <ValueIndexed Index="0">0x200001B0</ValueIndexed>
                 <ValueIndexed Index="1">0x18000090</ValueIndexed>
+                <ValueDefault>0x200001B0</ValueDefault>
             </Integer>
             <IntReg Name="DeviceTemperature">
                 <pAddress>TempAddr</pAddress>
@@ -113,7 +114,30 @@ public class GenICamXmlTests
             </IntReg>
             """);
 
-        Assert.Empty(registers);
+        Assert.Equal([0x18000090u, 0x200001B0u], registers.Select(r => r.Address));
+    }
+
+    [Fact]
+    public void ASelectorCombinesWithAFixedOffset()
+    {
+        // base picked by a selector, plus a constant offset into the block
+        List<XmlRegister> registers = Read("""
+            <Integer Name="Base">
+                <pIndex>sel</pIndex>
+                <ValueIndexed Index="0">0x20000000</ValueIndexed>
+                <ValueIndexed Index="1">0x20001000</ValueIndexed>
+            </Integer>
+            <Integer Name="Offset"><Value>0x10</Value></Integer>
+            <IntReg Name="Thing">
+                <pAddress>Base</pAddress>
+                <pAddress>Offset</pAddress>
+                <Length>4</Length>
+                <AccessMode>RW</AccessMode>
+                <pPort>Device</pPort>
+            </IntReg>
+            """);
+
+        Assert.Equal([0x20000010u, 0x20001010u], registers.Select(r => r.Address));
     }
 
     [Fact]

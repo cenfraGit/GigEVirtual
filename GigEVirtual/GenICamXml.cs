@@ -46,75 +46,96 @@ internal static class GenICamXml
             // ports are separate address spaces.
             if (Child(element, "pPort") != "Device") continue;
 
-            if (!TryAddress(element, byName, out uint address)) continue;
-
             string? lengthText = Child(element, "Length");
             if (lengthText is null || !TryNumber(lengthText, out long length) || length <= 0) continue;
 
-            // several features often describe the same register, one per field.
-            // they agree on the address and length, so the first wins.
-            if (found.ContainsKey(address)) continue;
+            RegAccess access = Child(element, "AccessMode") == "RO"
+                ? RegAccess.ReadOnly
+                : RegAccess.ReadWrite;
 
-            found[address] = new XmlRegister(
-                address,
-                (int)length,
-                Child(element, "AccessMode") == "RO" ? RegAccess.ReadOnly : RegAccess.ReadWrite,
-                // note the schema's spelling. left out means little-endian, which
-                // is the genicam default and what device registers overwhelmingly
-                // use. the big-endian bootstrap registers are ones we define
-                // ourselves, so this only ever applies to device space.
-                Child(element, "Endianess") == "BigEndian" ? Endianness.Big : Endianness.Little,
-                element.Attribute("Name")?.Value ?? element.Attribute("Comment")?.Value ?? "(unnamed)");
+            // note the schema's spelling. left out means little-endian, which is
+            // the genicam default and what device registers overwhelmingly use.
+            // the big-endian bootstrap registers are ones we define ourselves, so
+            // this only ever applies to device space.
+            Endianness endianness = Child(element, "Endianess") == "BigEndian"
+                ? Endianness.Big
+                : Endianness.Little;
+
+            string name = element.Attribute("Name")?.Value
+                ?? element.Attribute("Comment")?.Value ?? "(unnamed)";
+
+            foreach (uint address in Addresses(element, byName))
+            {
+                // several features often describe the same register, one per
+                // field. they agree on the address and length, so the first wins.
+                if (found.ContainsKey(address)) continue;
+
+                found[address] = new XmlRegister(address, (int)length, access, endianness, name);
+            }
         }
 
         return [.. found.Values.OrderBy(r => r.Address)];
     }
 
-    // an address is the sum of every Address and pAddress the node carries, which
-    // is how a description expresses base plus offset. returns false when any
-    // part cannot be resolved to a constant.
-    private static bool TryAddress(XElement element, Dictionary<string, XElement> byName, out uint address)
+    // every address this register can sit at. an address is the sum of the node's
+    // Address and pAddress parts, which is how a description expresses base plus
+    // offset. a part that selects between listed options multiplies the result:
+    // whichever the selector ends up pointing at, we want the register to exist
+    // there, and that beats evaluating the selector at runtime.
+    private static IEnumerable<uint> Addresses(XElement element, Dictionary<string, XElement> byName)
     {
-        address = 0;
-        long total = 0;
+        List<long> totals = [0];
         bool any = false;
 
         foreach (XElement part in element.Elements())
         {
             string kind = part.Name.LocalName;
+            List<long> options;
 
             if (kind == "Address")
             {
-                if (!TryNumber(part.Value, out long literal)) return false;
-                total += literal;
-                any = true;
+                if (!TryNumber(part.Value, out long literal)) return [];
+                options = [literal];
             }
             else if (kind == "pAddress")
             {
-                if (!TryConstant(part.Value.Trim(), byName, out long resolved)) return false;
-                total += resolved;
-                any = true;
+                options = Options(part.Value.Trim(), byName);
+                if (options.Count == 0) return [];
             }
+            else continue;
+
+            any = true;
+            totals = [.. totals.SelectMany(_ => options, (running, option) => running + option)];
         }
 
-        if (!any || total < 0 || total > uint.MaxValue) return false;
+        if (!any) return [];
 
-        address = (uint)total;
-        return true;
+        return totals.Where(t => t >= 0 && t <= uint.MaxValue).Select(t => (uint)t).Distinct();
     }
 
-    // a pAddress usually points at a plain <Integer><Value>. one carrying a
-    // pIndex picks its value from a selector, so it is only knowable at runtime.
-    private static bool TryConstant(string name, Dictionary<string, XElement> byName, out long value)
+    // what a pAddress can resolve to. a plain <Integer><Value> gives one answer.
+    // one carrying a pIndex picks from ValueIndexed entries at runtime, so every
+    // entry is a possibility. anything else, such as a formula, gives none.
+    private static List<long> Options(string name, Dictionary<string, XElement> byName)
     {
-        value = 0;
+        if (!byName.TryGetValue(name, out XElement? node)) return [];
+        if (node.Name.LocalName != "Integer") return [];
 
-        if (!byName.TryGetValue(name, out XElement? node)) return false;
-        if (node.Name.LocalName != "Integer") return false;
-        if (node.Elements().Any(e => e.Name.LocalName == "pIndex")) return false;
+        if (node.Elements().Any(e => e.Name.LocalName == "pIndex"))
+        {
+            List<long> indexed = [];
+
+            foreach (XElement option in node.Elements()
+                .Where(e => e.Name.LocalName is "ValueIndexed" or "ValueDefault"))
+            {
+                if (TryNumber(option.Value, out long value)) indexed.Add(value);
+            }
+
+            return indexed;
+        }
 
         string? text = Child(node, "Value");
-        return text is not null && TryNumber(text, out value);
+        return text is not null && TryNumber(text, out long constant) ? [constant] : [];
     }
 
     private static string? Child(XElement element, string name) =>
