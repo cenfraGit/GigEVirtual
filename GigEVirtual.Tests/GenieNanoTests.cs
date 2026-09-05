@@ -317,6 +317,18 @@ public class GenieNanoTests : IDisposable
         return count;
     }
 
+    // the last block reaches us slightly before the run finishes tearing itself
+    // down, so waiting is the honest assertion rather than looking straight away
+    private static void WaitUntilIdle(GVSPTransmitter transmitter)
+    {
+        DateTime until = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+
+        while (transmitter.IsStreaming && DateTime.UtcNow < until)
+            Thread.Sleep(10);
+
+        Assert.False(transmitter.IsStreaming, "the run did not end on its own");
+    }
+
     [Fact]
     public void ItStreamsItsOwnGeometry()
     {
@@ -428,7 +440,7 @@ public class GenieNanoTests : IDisposable
         Assert.Equal(1, Blocks(TimeSpan.FromMilliseconds(400)));
 
         // the run ended by itself, so the device is idle again
-        Assert.False(transmitter.IsStreaming);
+        WaitUntilIdle(transmitter);
     }
 
     [Fact]
@@ -442,6 +454,23 @@ public class GenieNanoTests : IDisposable
         transmitter.StartAcquisition();
 
         Assert.Equal(5, Blocks(TimeSpan.FromMilliseconds(700)));
-        Assert.False(transmitter.IsStreaming);
+        WaitUntilIdle(transmitter);
+    }
+
+    [Fact]
+    public void ARunThatEndedOnItsOwnCanBeStartedAgain()
+    {
+        GVSPTransmitter transmitter = Streaming();
+        Write(FrameRate, 50_000);
+        Write(AcquisitionMode, 1); // single frame
+
+        // the interesting part is the second start landing right after the first
+        // run tore itself down
+        for (int i = 0; i < 8; i++)
+        {
+            Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, transmitter.StartAcquisition());
+            Assert.Equal(1, Blocks(TimeSpan.FromMilliseconds(300)));
+            WaitUntilIdle(transmitter);
+        }
     }
 }

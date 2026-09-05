@@ -90,6 +90,11 @@ internal class GVSPTransmitter
 
     public ushort StartAcquisition()
     {
+        // everything that reads a register happens before the lock is taken. a
+        // write hook already holds the register lock when it calls stop, so
+        // taking them the other way round here would be a deadlock waiting to
+        // happen.
+
         // if already streaming
         if (_cts != null) return GVCPStatus.GEV_STATUS_BUSY;
 
@@ -128,20 +133,33 @@ internal class GVSPTransmitter
         _pixelFormat = _settings.PixelFormat();
 
         // udp connection
-        _udpClient = new(new IPEndPoint(_bindAddress, 0));
+        UdpClient client = new(new IPEndPoint(_bindAddress, 0));
         IPEndPoint endpoint = new(destinationIP, port);
-        _udpClient.Connect(endpoint);
-        _udpClient.Client.DontFragment = doNotFragment;
+        client.Connect(endpoint);
+        client.Client.DontFragment = doNotFragment;
         if (OperatingSystem.IsWindows())
         {
             const int SIO_UDP_CONNRESET = -1744830452;
-            _udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, [0], null);
+            client.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, [0], null);
         }
 
         Console.WriteLine($"[GVSP] StartAcquisition: dest={destinationIP}:{port}, " +
             $"packetSize={_packetSize}, packetDelay={delayNanoseconds}ns");
 
-        _cts = new();
+        // the socket and the token go live together. a run that is finishing
+        // decides whether to tear anything down by comparing against the current
+        // token, so it must never see the new socket beside the old token.
+        lock (_sendLock)
+        {
+            if (_cts is not null)
+            {
+                client.Dispose();
+                return GVCPStatus.GEV_STATUS_BUSY;
+            }
+
+            _udpClient = client;
+            _cts = new();
+        }
 
         // Task.Run, not a bare call: an async method runs inline until its first
         // await, and Stream only awaits at the end of a block. calling it
