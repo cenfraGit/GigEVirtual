@@ -232,6 +232,72 @@ public class DeviceStateTests
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0xA000, U32(320)));
     }
 
+    // --------------------------------------------------------------- exclusive access
+
+    // exclusive_access is CCP bit 31 in spec numbering, so the low bit
+    private const uint Exclusive = 1;
+    private const uint Control = 2;
+
+    [Fact]
+    public void ControlAccessStillLetsOthersRead()
+    {
+        var state = new DeviceState();
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(Control)));
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(Other, 0x0000, out byte[]? version));
+        Assert.Equal(0x00020002u, ReadU32(version!));
+    }
+
+    [Fact]
+    public void ExclusiveAccessRefusesReadsFromOthers()
+    {
+        var state = new DeviceState();
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(Exclusive)));
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_ACCESS_DENIED, state.ReadRegister(Other, 0x0000, out byte[]? value));
+        Assert.Null(value);
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_ACCESS_DENIED, state.ReadMemory(Other, 0x0048, 32, out _));
+    }
+
+    [Fact]
+    public void ExclusiveAccessStillAnswersThePrimary()
+    {
+        var state = new DeviceState();
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(Exclusive)));
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(Controller, 0x0000, out _));
+    }
+
+    [Fact]
+    public void ReleasingExclusiveAccessLetsOthersReadAgain()
+    {
+        var state = new DeviceState();
+        state.WriteRegister(Controller, 0x0A00, U32(Exclusive));
+        Assert.Equal(GVCPStatus.GEV_STATUS_ACCESS_DENIED, state.ReadRegister(Other, 0x0000, out _));
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.WriteRegister(Controller, 0x0A00, U32(0)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(Other, 0x0000, out _));
+    }
+
+    [Fact]
+    public void NobodyIsRefusedWhenNoApplicationHoldsTheDevice()
+    {
+        var state = new DeviceState();
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(Other, 0x0000, out _));
+    }
+
+    [Fact]
+    public void DeviceReadsAreNotGatedByExclusiveAccess()
+    {
+        var state = new DeviceState();
+        state.WriteRegister(Controller, 0x0A00, U32(Exclusive));
+
+        // the unchecked overload is what GVSP setup and the discovery ack use
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(0x0000, out _));
+    }
+
     // --------------------------------------------------------------- heartbeat
 
     // the shortest timeout the spec allows, so the tests stay quick

@@ -236,7 +236,7 @@ internal class GVCPServer
 
                     Console.WriteLine($"List of addresses to read: {string.Join(", ", addresses.Select(a => $"0x{a:X8}"))}");
 
-                    ack = BuildReadRegAck(req_id, addresses);
+                    ack = BuildReadRegAck(req_id, addresses, result.RemoteEndPoint);
                     break;
                 case GVCPMessages.WRITEREG_CMD:
                     // WRITEREG_CMD payload consists of pairs of address + data,
@@ -277,7 +277,7 @@ internal class GVCPServer
 
                     Console.WriteLine($"[READMEM] address is {address:X8}");
 
-                    ack = BuildReadMemAck(req_id, address, count);
+                    ack = BuildReadMemAck(req_id, address, count, result.RemoteEndPoint);
                     break;
                 case GVCPMessages.WRITEMEM_CMD:
 
@@ -446,7 +446,7 @@ internal class GVCPServer
         return new Ack(GVCPMessages.DISCOVERY_ACK, status, ack);
     }
 
-    private Ack BuildReadRegAck(ushort req_id, uint[] addresses)
+    private Ack BuildReadRegAck(ushort req_id, uint[] addresses, IPEndPoint sender)
     {
         // header (8 bytes) + (4 bytes per address)
         byte[] ack = new byte[8 + (4 * addresses.Length)];
@@ -467,7 +467,7 @@ internal class GVCPServer
         {
             // save status and if not successful, exit early. status
             // will be written as overall operation status
-            readRegisterResult = _deviceState.ReadRegister(address, out value);
+            readRegisterResult = _deviceState.ReadRegister(sender, address, out value);
             if (readRegisterResult != GVCPStatus.GEV_STATUS_SUCCESS || value is null)
             {
                 break;
@@ -589,7 +589,7 @@ internal class GVCPServer
         return new Ack(GVCPMessages.WRITEREG_ACK, status, ack);
     }
 
-    private Ack BuildReadMemAck(ushort req_id, uint address, ushort count)
+    private Ack BuildReadMemAck(ushort req_id, uint address, ushort count, IPEndPoint sender)
     {
         // header (8 bytes) + address (4 bytes) + (1 byte per data)
         byte[] ack = new byte[8 + 4 + count];
@@ -602,7 +602,7 @@ internal class GVCPServer
         offset += 4;
 
         // then just read memory and copy to ack payload section
-        ushort status = _deviceState.ReadMemory(address, count, out byte[]? value);
+        ushort status = _deviceState.ReadMemory(sender, address, count, out byte[]? value);
         if (status == GVCPStatus.GEV_STATUS_SUCCESS)
             Array.Copy(value!, 0, ack, offset, value!.Length);
 

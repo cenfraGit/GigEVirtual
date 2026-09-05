@@ -427,6 +427,32 @@ internal class DeviceState
         return ReadMemory(address, 4, out value);
     }
 
+    // the overloads taking a sender are the ones client traffic must use. the
+    // plain ones above are unchecked, for the device's own reads (GVSP setup)
+    // and for DISCOVERY, which is answered no matter who asks.
+    public ushort ReadMemory(IPEndPoint sender, uint address, ushort count, out byte[]? value)
+    {
+        lock (_registersLock)
+        {
+            // spec: while an application holds exclusive access nobody else gets
+            // an answer. plain control access still lets others monitor
+            bool exclusive = (PeekUint(0x0A00) & 0x1) != 0;
+
+            if (exclusive && !Equals(_primaryController, sender))
+            {
+                value = null;
+                return GVCPStatus.GEV_STATUS_ACCESS_DENIED;
+            }
+
+            return ReadMemory(address, count, out value);
+        }
+    }
+
+    public ushort ReadRegister(IPEndPoint sender, uint address, out byte[]? value)
+    {
+        return ReadMemory(sender, address, 4, out value);
+    }
+
     public ushort WriteRegister(IPEndPoint sender, uint address, byte[] value)
     {
         return WriteMemory(sender, address, value, out _);
