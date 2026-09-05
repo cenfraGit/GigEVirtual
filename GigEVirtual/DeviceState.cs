@@ -21,6 +21,11 @@ internal class Register
     public int Length;
     public RegAccess Access;
 
+    // this register's own bytes. storage follows the registers rather than the
+    // address space, which is what lets a device scatter registers across the
+    // full 32-bit range without allocating the gaps between them.
+    public byte[] Data = [];
+
     // only the primary application may write. false for CCP itself, which has
     // to be writable before anyone holds control.
     public bool NeedsControl = true;
@@ -59,10 +64,9 @@ internal class DeviceState
     // addresses are 32-bit. but spec doesn't say about a strict memory ceiling.
     // maybe 1MB is fine?
 
-    private byte[] _memory = new byte[0x100000];
-
-    // _memory holds the bytes, this decides which of those bytes are actually
-    // reachable
+    // every register this device answers for, and the bytes behind each one.
+    // an address that is not covered here does not exist as far as an
+    // application is concerned.
     private readonly SortedList<uint, Register> _registers = [];
 
     // just in case it's accessed at the same time either from GVCP or GVSP
@@ -347,6 +351,8 @@ internal class DeviceState
             SelfClearing = selfClearing,
         };
 
+        register.Data = new byte[register.Length];
+
         _registers.Add(address, register);
         return register;
     }
@@ -362,7 +368,7 @@ internal class DeviceState
     private Register DefineFloat(uint address, RegAccess access, float value)
     {
         Register register = Define(address, 4, access, needsControl: true, selfClearing: false);
-        BinaryPrimitives.WriteSingleBigEndian(_memory.AsSpan((int)address, 4), value);
+        BinaryPrimitives.WriteSingleBigEndian(register.Data, value);
         return register;
     }
 
@@ -378,7 +384,7 @@ internal class DeviceState
         if (copyLength < length || stringBytes.Length < length)
             copyLength = Math.Min(copyLength, length - 1);
 
-        Array.Copy(stringBytes, 0, _memory, (int)address, copyLength);
+        stringBytes.AsSpan(0, copyLength).CopyTo(register.Data);
         return register;
     }
 
@@ -428,6 +434,26 @@ internal class DeviceState
         return covered;
     }
 
+    // copies a range out of however many registers it spans. Cover has already
+    // established that the whole range is mapped and contiguous.
+    private static byte[] Gather(List<Register> covered, uint address, int count)
+    {
+        byte[] result = new byte[count];
+        uint end = address + (uint)count;
+
+        foreach (Register register in covered)
+        {
+            uint from = Math.Max(address, register.Address);
+            uint to = Math.Min(end, register.Address + (uint)register.Length);
+            if (to <= from) continue;
+
+            register.Data.AsSpan((int)(from - register.Address), (int)(to - from))
+                .CopyTo(result.AsSpan((int)(from - address)));
+        }
+
+        return result;
+    }
+
     // --------------------------------------------------------------- methods
 
     private static uint Pack(uint value, int specBitStart, int width)
@@ -439,13 +465,23 @@ internal class DeviceState
 
     private static uint ReadU32(byte[] value) => BinaryPrimitives.ReadUInt32BigEndian(value);
 
-    // unchecked access straight to _memory, for our own use. client
+    // the bytes behind an address, wherever they live. throws for an unmapped
+    // address, which would be our own bug rather than an application's.
+    private Span<byte> Bytes(uint address, int count)
+    {
+        Register register = Resolve(address)
+            ?? throw new ArgumentOutOfRangeException(nameof(address), $"no register at 0x{address:X8}");
+
+        return register.Data.AsSpan((int)(address - register.Address), count);
+    }
+
+    // unchecked access straight to the register bytes, for our own use. client
     // traffic goes through ReadMemory/WriteMemory instead.
     private uint PeekUint(uint address) =>
-        BinaryPrimitives.ReadUInt32BigEndian(_memory.AsSpan((int)address, 4));
+        BinaryPrimitives.ReadUInt32BigEndian(Bytes(address, 4));
 
     private void PokeUint(uint address, uint value) =>
-        BinaryPrimitives.WriteUInt32BigEndian(_memory.AsSpan((int)address, 4), value);
+        BinaryPrimitives.WriteUInt32BigEndian(Bytes(address, 4), value);
 
     public ushort ReadMemory(uint address, ushort count, out byte[]? value)
     {
@@ -460,10 +496,11 @@ internal class DeviceState
             if (address % 4 != 0 || count % 4 != 0)
                 return GVCPStatus.GEV_STATUS_BAD_ALIGNMENT;
 
-            if (count == 0 || Cover(address, count) is null)
+            List<Register>? covered = count == 0 ? null : Cover(address, count);
+            if (covered is null)
                 return GVCPStatus.GEV_STATUS_INVALID_ADDRESS;
 
-            value = _memory.AsSpan((int)address, count).ToArray();
+            value = Gather(covered, address, count);
             return GVCPStatus.GEV_STATUS_SUCCESS;
         }
     }
@@ -512,10 +549,10 @@ internal class DeviceState
                     if (status != GVCPStatus.GEV_STATUS_SUCCESS) return status;
                 }
 
-                Array.Copy(slice, 0, _memory, (int)register.Address, length);
+                slice.CopyTo(register.Data);
 
                 if (register.SelfClearing)
-                    Array.Clear(_memory, (int)register.Address, register.Length);
+                    Array.Clear(register.Data);
             }
 
             index = value.Length;
@@ -563,7 +600,7 @@ internal class DeviceState
     public void SetIP(IPAddress ipLocal)
     {
         lock (_registersLock)
-            Array.Copy(ipLocal.GetAddressBytes(), 0, _memory, 0x0024, 4);
+            ipLocal.GetAddressBytes().CopyTo(Bytes(0x0024, 4));
     }
 
     // recomputes SCMBS0 / SCMPC0. called whenever geometry, pixel format or

@@ -119,6 +119,25 @@ public class DeviceStateTests
         Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_ADDRESS, state.WriteMemory(Controller, 0x00EC, U32(0), out _));
     }
 
+    [Fact]
+    public void StorageFollowsTheRegistersRatherThanTheAddressSpace()
+    {
+        // a real device scatters registers across the 32-bit range: the genie
+        // nano reaches 0xB0000000 while holding about 8 KB of actual register
+        // data. address-indexed storage would have to allocate the whole span,
+        // so what we hold has to track the registers instead.
+        long before = GC.GetTotalAllocatedBytes(precise: true);
+        DeviceState state = new();
+        long after = GC.GetTotalAllocatedBytes(precise: true);
+
+        // the xml is the largest thing in here by far. the flat array this
+        // replaced was a megabyte on its own.
+        Assert.InRange(after - before, 0, 500_000);
+
+        // and it still works
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(0x0000, out _));
+    }
+
     // --------------------------------------------------------------- access modes
 
     [Fact]
