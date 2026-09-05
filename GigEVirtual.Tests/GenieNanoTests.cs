@@ -52,6 +52,21 @@ public class GenieNanoTests : IDisposable
     private const uint BinningMaxX = 0x20003BFC;
     private const uint BinningMaxY = 0x20002A40;
 
+    // the register that switches each event on, and the id it then arrives under
+    private const uint ExposureStartEnable = 0x20001480;
+    private const uint FrameStartEnable = 0x20000190;
+    private const uint ValidTriggerEnable = 0x200014B0;
+    private const uint InvalidTriggerEnable = 0x200014C0;
+    private const uint NextValidEnable = 0x200014A0;
+    private const uint ExposureEndEnable = 0x20001490;
+
+    private const ushort ExposureStartEvent = 0x9C40;
+    private const ushort FrameStartEvent = 0x9C41;
+    private const ushort ValidFrameTriggerEvent = 0x9C42;
+    private const ushort InvalidFrameTriggerEvent = 0x9C43;
+    private const ushort NextValidEvent = 0x9C44;
+    private const ushort ExposureEndEvent = 0x9C46;
+
     private readonly string _dir;
     private readonly string _xmlPath;
     private readonly GenieNano.Built _built;
@@ -67,6 +82,12 @@ public class GenieNanoTests : IDisposable
 
         _built = GenieNano.BuildState(_xmlPath);
         _state = _built.State;
+
+        // stands in for the message channel, which a device wires up for itself
+        _state.OnEvent((eventId, blockId) =>
+        {
+            lock (_events) _events.Add((eventId, blockId));
+        });
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, _state.WriteRegister(Controller, 0x0A00, U32BE(2)));
     }
 
@@ -637,5 +658,117 @@ public class GenieNanoTests : IDisposable
 
         Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_PARAMETER, Write(FrameRate, 0));
         Assert.Equal(before, _state.ReadUint(ExposureMaxLive));
+    }
+
+    // --------------------------------------------------------------- events
+
+    private readonly List<(ushort EventId, ulong BlockId)> _events = [];
+
+    private List<(ushort EventId, ulong BlockId)> Events()
+    {
+        lock (_events) return [.. _events];
+    }
+
+    private ushort[] Ids() => [.. Events().Select(e => e.EventId)];
+
+    [Fact]
+    public void NothingIsAnnouncedUntilTheApplicationAsksForIt()
+    {
+        GVSPTransmitter transmitter = Streaming();
+        Write(AcquisitionMode, 1); // single frame
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, transmitter.StartAcquisition());
+        WaitUntilIdle(transmitter);
+
+        Assert.Empty(Events());
+    }
+
+    // the description declares no gap between the two, so they share a timestamp
+    // and a block
+    [Fact]
+    public void EveryBlockAnnouncesItsFrameStartAndItsExposureStart()
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(FrameStartEnable, 1));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ExposureStartEnable, 1));
+
+        GVSPTransmitter transmitter = Streaming();
+        Write(AcquisitionMode, 2);          // multi frame
+        Write(AcquisitionFrameCount, 2);
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, transmitter.StartAcquisition());
+        WaitUntilIdle(transmitter);
+
+        Assert.Equal(
+            [(FrameStartEvent, 1ul), (ExposureStartEvent, 1ul),
+             (FrameStartEvent, 2ul), (ExposureStartEvent, 2ul)],
+            Events());
+    }
+
+    // switching one on does not switch its neighbours on
+    [Fact]
+    public void OnlyTheEventsThatWereAskedForArrive()
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ExposureEndEnable, 1));
+
+        GVSPTransmitter transmitter = Streaming();
+        Write(AcquisitionMode, 1);
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, transmitter.StartAcquisition());
+        WaitUntilIdle(transmitter);
+
+        Assert.Equal([(ExposureEndEvent, 1ul)], Events());
+    }
+
+    // the run as a whole ended, so there is no block to hang this one on
+    [Fact]
+    public void TheEndOfARunSaysAcquisitionCanStartAgain()
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(NextValidEnable, 1));
+
+        GVSPTransmitter transmitter = Streaming();
+        Write(AcquisitionMode, 1);
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, transmitter.StartAcquisition());
+        WaitUntilIdle(transmitter);
+
+        Assert.Equal([(NextValidEvent, 0ul)], Events());
+    }
+
+    [Fact]
+    public void ATriggerTheCameraCanActOnIsAnnouncedAsValid()
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ValidTriggerEnable, 1));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(TriggerSoftware, 1));
+
+        Assert.Equal([(ValidFrameTriggerEvent, 0ul)], Events());
+    }
+
+    // triggering faster than the camera consumes them is the one thing an
+    // application cannot see any other way
+    [Fact]
+    public void ATriggerThatArrivesWithOneAlreadyWaitingIsAnnouncedAsInvalid()
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ValidTriggerEnable, 1));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(InvalidTriggerEnable, 1));
+
+        Write(TriggerSoftware, 1);
+        Write(TriggerSoftware, 1);
+        Write(TriggerSoftware, 1);
+
+        Assert.Equal(
+            [ValidFrameTriggerEvent, InvalidFrameTriggerEvent, InvalidFrameTriggerEvent],
+            Ids());
+    }
+
+    [Fact]
+    public void APulseOnALineTheCameraIsNotListeningToAnnouncesNothing()
+    {
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(ValidTriggerEnable, 1));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(InvalidTriggerEnable, 1));
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, Write(TriggerSource, 6)); // line 1
+
+        Assert.False(GenieNano.Pulse(_built, 2));
+
+        Assert.Empty(Events());
     }
 }

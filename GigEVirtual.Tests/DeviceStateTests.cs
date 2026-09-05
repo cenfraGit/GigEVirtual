@@ -756,4 +756,22 @@ public class DeviceStateTests
         Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(0x0934, out byte[]? capability));
         Assert.NotEqual(0u, ReadU32(capability!) & 0x00000004);
     }
+
+    // an application checks all three before it tries to open a message channel:
+    // that there is one, that EVENT messages come out of it, and that we report
+    // the source port it needs to let our traffic back in through
+    [Fact]
+    public void TheDeviceAdvertisesItsMessageChannel()
+    {
+        DeviceState state = TestDevice.Bare();
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(0x0900, out byte[]? channels));
+        Assert.Equal(1u, ReadU32(channels!));
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(0x0934, out byte[]? capability));
+        Assert.NotEqual(0u, ReadU32(capability!) & 0x00000008); // EVENT, bit 28
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(0x0930, out byte[]? message));
+        Assert.NotEqual(0u, ReadU32(message!) & 0x80000000); // MCSP, bit 0
+    }
 }

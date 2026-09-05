@@ -33,12 +33,26 @@ public abstract class GigEDevice
         Transmitter = new GVSPTransmitter(state, address, new ImageSource(imagePath), settings);
         _server = new GVCPServer(address, state, shareToNetwork);
 
-        // the same three seams for every device, so a device only has to wire up
-        // what is actually specific to it
-        state.OnControlChannelClosed(() => Transmitter.StopAcquisition());
+        MessageChannel messages = new(state, address);
+
+        // the same seams for every device, so a device only has to wire up what
+        // is actually specific to it
+        state.OnControlChannelClosed(() =>
+        {
+            Transmitter.StopAcquisition();
+            messages.Close();
+        });
+
         state.OnFireTestPacket(Transmitter.SendTestPacket);
         state.OnPacketResend(Transmitter.Resend);
         state.StreamingCheck(() => Transmitter.IsStreaming);
+        state.OnEvent(messages.Raise);
+
+        state.OnMessageChannel(destination =>
+        {
+            if (destination is null) messages.Close();
+            else messages.Open(destination);
+        });
     }
 
     // tells the device to drop one stream packet in every n on the way out. no

@@ -11,6 +11,21 @@ using System.Net.Sockets;
 
 namespace GigEVirtual;
 
+// the moments in a transfer a device might want to tell an application about.
+// the transmitter reaches them, the device decides what if anything they are
+// called and whether they are switched on.
+internal enum StreamPhase
+{
+    // the sensor starts collecting light for a block
+    FrameStart,
+
+    // it stops, which here is when the frame is in hand and ready to go out
+    ExposureEnd,
+
+    // the run finished on its own, so acquisition can be started again
+    AcquisitionEnd,
+}
+
 // everything the transmitter asks its device. delegates rather than addresses,
 // because a device is free to place these registers anywhere, store them in
 // either byte order, and hold a value as whatever type suits it.
@@ -41,6 +56,10 @@ internal record StreamSettings(
     // how many blocks this run sends before it stops on its own. zero streams
     // until the application says otherwise.
     public Func<int> BlockLimit { get; init; } = () => 0;
+
+    // called as the transfer passes each of those moments, with the block it is
+    // on. a device with nothing to announce leaves this alone.
+    public Action<StreamPhase, ulong> Report { get; init; } = (_, _) => { };
 }
 
 internal class GVSPTransmitter
@@ -439,9 +458,13 @@ internal class GVSPTransmitter
             // packet_id is reset at the start of each block
             _packet_id = 0;
 
+            _settings.Report(StreamPhase.FrameStart, _block_id);
+
             // one frame per block
             byte[] frame = _imageSource.NextFrame(_width, _height, _pixelFormat,
                                                   _settings.Brightness());
+
+            _settings.Report(StreamPhase.ExposureEnd, _block_id);
 
             // spec says for data payload packets, the packet size
             // is IP header + UDP header + GVSP header
@@ -475,7 +498,12 @@ internal class GVSPTransmitter
 
             // a run that was asked for a fixed number of frames ends itself
             int limit = _settings.BlockLimit();
-            if (limit > 0 && sent >= limit) break;
+            if (limit > 0 && sent >= limit)
+            {
+                // no block to hang this on: the run as a whole is what ended
+                _settings.Report(StreamPhase.AcquisitionEnd, 0);
+                break;
+            }
 
             // a triggered run waits for the next trigger rather than a clock
             if (_settings.TriggerEnabled()) continue;

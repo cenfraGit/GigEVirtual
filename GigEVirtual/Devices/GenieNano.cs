@@ -19,7 +19,11 @@ public class GenieNano : GigEDevice
     {
         private int _pending;
 
-        public void Fire() => Interlocked.Exchange(ref _pending, 1);
+        // true when the gate was empty and this trigger is the one that will
+        // produce the next block. false when one was already waiting, so this
+        // trigger arrived too soon and the camera has nowhere to put it.
+        public bool Fire() => Interlocked.Exchange(ref _pending, 1) == 0;
+
         public bool Take() => Interlocked.Exchange(ref _pending, 0) == 1;
     }
 
@@ -92,6 +96,24 @@ public class GenieNano : GigEDevice
 
     // mono8, mono10 and mono12, which are bits 0, 1 and 2
     private const uint MonoFormats = 0b111;
+
+    // the ids the description gives its events. an application reads these out
+    // of that file and matches them against what arrives on the message channel.
+    private const ushort ExposureStartEvent = 0x9C40;
+    private const ushort FrameStartEvent = 0x9C41;
+    private const ushort ValidFrameTriggerEvent = 0x9C42;
+    private const ushort InvalidFrameTriggerEvent = 0x9C43;
+    private const ushort NextValidEvent = 0x9C44;
+    private const ushort ExposureEndEvent = 0x9C46;
+
+    // each event is switched on through a register of its own, which the event
+    // selector indexes into. these are the addresses it indexes.
+    private const uint ExposureStartEnable = 0x20001480;
+    private const uint FrameStartEnable = 0x20000190;
+    private const uint ValidTriggerEnable = 0x200014B0;
+    private const uint InvalidTriggerEnable = 0x200014C0;
+    private const uint NextValidEnable = 0x200014A0;
+    private const uint ExposureEndEnable = 0x20001490;
 
     // the description reaches 0xB0000000, so the blob sits clear of all of it
     private const uint XmlAddress = 0xF0000000;
@@ -167,8 +189,50 @@ public class GenieNano : GigEDevice
     {
         if (built.State.ReadUint(TriggerSource) != LineTrigger(line)) return false;
 
-        built.Gate.Fire();
+        Trigger(built.State, built.Gate);
         return true;
+    }
+
+    // a trigger the camera can act on, or one that turned up while an untouched
+    // one was still waiting and so has nowhere to go. it says which on the
+    // message channel either way, which is the only way an application finds out
+    // it is triggering faster than the camera can keep up.
+    private static void Trigger(DeviceState state, TriggerGate gate)
+    {
+        if (gate.Fire())
+            Raise(state, ValidTriggerEnable, ValidFrameTriggerEvent, 0);
+        else
+            Raise(state, InvalidTriggerEnable, InvalidFrameTriggerEvent, 0);
+    }
+
+    // an event only goes out once the application has switched it on, which it
+    // does through the register the description pairs with that event
+    private static void Raise(DeviceState state, uint enable, ushort eventId, ulong blockId)
+    {
+        if (state.ReadUint(enable) == 0) return;
+
+        state.RaiseEvent(eventId, blockId);
+    }
+
+    // the nano declares no gap between a frame starting and its exposure
+    // starting, so those two arrive together with the same timestamp.
+    private static void Report(DeviceState state, StreamPhase phase, ulong blockId)
+    {
+        switch (phase)
+        {
+            case StreamPhase.FrameStart:
+                Raise(state, FrameStartEnable, FrameStartEvent, blockId);
+                Raise(state, ExposureStartEnable, ExposureStartEvent, blockId);
+                break;
+
+            case StreamPhase.ExposureEnd:
+                Raise(state, ExposureEndEnable, ExposureEndEvent, blockId);
+                break;
+
+            case StreamPhase.AcquisitionEnd:
+                Raise(state, NextValidEnable, NextValidEvent, blockId);
+                break;
+        }
     }
 
     private static uint LineTrigger(int line) => line switch
@@ -257,7 +321,7 @@ public class GenieNano : GigEDevice
         // TriggerSource feature is set to", so it does not consult the source
         Define(state, TriggerSoftware, 0, selfClearing: true, onWrite: (_, _) =>
         {
-            gate.Fire();
+            Trigger(state, gate);
             return GVCPStatus.GEV_STATUS_SUCCESS;
         });
 
@@ -271,6 +335,15 @@ public class GenieNano : GigEDevice
 
         Define(state, TriggerMode, 0);
         Define(state, FrameRateEnable, 1);
+
+        // every event comes up switched off, the way a real nano does: an
+        // application asks for the ones it wants through the event selector
+        Define(state, ExposureStartEnable, 0);
+        Define(state, FrameStartEnable, 0);
+        Define(state, ValidTriggerEnable, 0);
+        Define(state, InvalidTriggerEnable, 0);
+        Define(state, NextValidEnable, 0);
+        Define(state, ExposureEndEnable, 0);
 
         DefineReadOnly(state, PixelFormatCaps, MonoFormats);
         DefineReadOnly(state, FrameRateMin, MinFrameRate);
@@ -354,6 +427,7 @@ public class GenieNano : GigEDevice
             TakeTrigger = () => built.Gate.Take(),
             TriggerDelay = () => TimeSpan.FromMicroseconds(state.ReadUint(TriggerDelay)),
             BlockLimit = () => BlockLimit(state),
+            Report = (phase, blockId) => Report(state, phase, blockId),
         };
     }
 

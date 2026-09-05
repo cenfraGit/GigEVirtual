@@ -101,6 +101,11 @@ internal class DeviceState
     private Func<int, ushort>? _fireTestPacket;
     private Action<ushort, ulong, uint, uint>? _packetResend;
 
+    // set by the device. opening and closing the message channel needs a socket,
+    // and pushing an event down it needs somewhere to queue. null means close.
+    private Action<IPEndPoint?>? _messageChannel;
+    private Action<ushort, ulong>? _event;
+
     // set by the device, so we can tell whether a transfer is in progress
     private Func<bool>? _isStreaming;
 
@@ -215,11 +220,15 @@ internal class DeviceState
         // number of network interfaces
         DefineUint(0x0600, RegAccess.ReadOnly, 1);
 
-        // number of message channels
-        DefineUint(0x0900, RegAccess.ReadOnly, 0);
+        // number of message channels. a device may have one or none
+        DefineUint(0x0900, RegAccess.ReadOnly, 1);
 
         // number of stream channels
         DefineUint(0x0904, RegAccess.ReadOnly, 1);
+
+        // message channel capability. we serve MCSP, but not the concatenation
+        // of several events into one EVENTDATA message
+        DefineUint(0x0930, RegAccess.ReadOnly, Pack(1, specBitStart: 0, width: 1));
 
         // gvsp capability
         uint gvspCapability =
@@ -234,6 +243,7 @@ internal class DeviceState
             Pack(1, specBitStart: 0, width: 1) |  // user_defined_name supported
             Pack(1, specBitStart: 1, width: 1) |  // serial_number supported
             Pack(1, specBitStart: 6, width: 1) |  // test packets carry LFSR data
+            Pack(1, specBitStart: 28, width: 1) | // EVENT supported
             Pack(1, specBitStart: 29, width: 1) | // PACKETRESEND supported
             Pack(1, specBitStart: 30, width: 1) | // WRITEMEM supported
             Pack(1, specBitStart: 31, width: 1);  // concatenation supported
@@ -276,6 +286,46 @@ internal class DeviceState
         // control channel privilege. writable without control, (how
         // control gets claimed in the first place)
         DefineUint(0x0A00, RegAccess.ReadWrite, 0, needsControl: false).OnWrite = HandleCCPWrite;
+
+        // message channel registers
+
+        // message channel port (mcp). writing a port opens the channel and
+        // writing 0 closes it, so this is the last register an application
+        // touches to open one and the first to touch to close one
+        DefineUint(0x0B00, RegAccess.ReadWrite, 0).OnWrite = (_, v) =>
+        {
+            ushort hostPort = (ushort)(ReadU32(v) & 0xFFFF);
+
+            if (hostPort == 0)
+            {
+                _messageChannel?.Invoke(null);
+                return GVCPStatus.GEV_STATUS_SUCCESS;
+            }
+
+            IPAddress destination = new(Bytes(0x0B10, 4).ToArray());
+
+            // opening a channel with nowhere to send it is not something we can
+            // half-do, so the write is refused rather than quietly ignored
+            if (destination.Equals(IPAddress.Any))
+                return GVCPStatus.GEV_STATUS_INVALID_PARAMETER;
+
+            _messageChannel?.Invoke(new IPEndPoint(destination, hostPort));
+            return GVCPStatus.GEV_STATUS_SUCCESS;
+        };
+
+        // message channel destination address (mcda)
+        DefineUint(0x0B10, RegAccess.ReadWrite, 0);
+
+        // message channel transmission timeout (mctt), in milliseconds. 0 turns
+        // acknowledges off entirely, which is the state we come up in: an
+        // application that wants them asks for them.
+        DefineUint(0x0B14, RegAccess.ReadWrite, 0);
+
+        // message channel retry count (mcrc)
+        DefineUint(0x0B18, RegAccess.ReadWrite, 3);
+
+        // message channel source port (mcsp). filled in while the channel is open
+        DefineUint(0x0B1C, RegAccess.ReadOnly, 0);
 
         // gvsp registers
 
@@ -798,7 +848,11 @@ internal class DeviceState
             // available for another application, and its registers have to
             // represent that new state
             PokeUint(0x0A00, 0); // CCP
+            PokeUint(0x0B00, 0); // MCP, the message channel port
             PokeUint(0x0D00, 0); // SCP0, the stream channel port
+
+            // only the primary application can have opened it, and it is gone
+            _messageChannel?.Invoke(null);
 
             _controlChannelClosed?.Invoke();
         }
@@ -815,6 +869,15 @@ internal class DeviceState
     // primary or not, and it never acknowledges one on the control channel.
     public void PacketResend(ushort streamChannel, ulong blockId, uint firstPacketId, uint lastPacketId) =>
         _packetResend?.Invoke(streamChannel, blockId, firstPacketId, lastPacketId);
+
+    public void OnMessageChannel(Action<IPEndPoint?> hook) => _messageChannel = hook;
+
+    public void OnEvent(Action<ushort, ulong> hook) => _event = hook;
+
+    // an asynchronous event on its way to the message channel. blockId is the
+    // data block the event belongs to, or 0 when it belongs to none. it goes
+    // nowhere unless an application has opened the channel.
+    public void RaiseEvent(ushort eventId, ulong blockId) => _event?.Invoke(eventId, blockId);
 
     public void StreamingCheck(Func<bool> check) => _isStreaming = check;
 
