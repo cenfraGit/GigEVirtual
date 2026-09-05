@@ -62,6 +62,7 @@ internal class Program
         Dump(handle);
         Writes(handle);
         Snap(handle);
+        Lossy(handle, nano);
         Triggered(handle, nano);
 
         HOperatorSet.CloseFramegrabber(handle);
@@ -178,6 +179,35 @@ internal class Program
         catch (HOperatorException e)
         {
             Report("grab_image", e);
+        }
+    }
+
+    // the other thing only an emulator can do: lose packets on purpose and watch
+    // the application ask for them back
+    private static void Lossy(HTuple handle, GigEDevice device)
+    {
+        Console.WriteLine("--- dropping one packet in fifty");
+
+        device.DropOneIn = 50;
+
+        try
+        {
+            HOperatorSet.SetFramegrabberParam(handle, "grab_timeout", 5000);
+            HOperatorSet.GrabImage(out HObject image, handle);
+            HOperatorSet.GetImageSize(image, out HTuple width, out HTuple height);
+
+            HOperatorSet.GetFramegrabberParam(handle, "buffer_is_incomplete", out HTuple incomplete);
+            Console.WriteLine($"  grabbed {width[0].I} x {height[0].I}, incomplete={Show(incomplete)}");
+
+            image.Dispose();
+        }
+        catch (HOperatorException e)
+        {
+            Report("lossy grab", e);
+        }
+        finally
+        {
+            device.DropOneIn = 0;
         }
     }
 

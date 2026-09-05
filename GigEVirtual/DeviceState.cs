@@ -99,6 +99,7 @@ internal class DeviceState
     // set by the device. firing a test packet needs a socket, which is the
     // transmitter's business rather than ours
     private Func<int, ushort>? _fireTestPacket;
+    private Action<ushort, ulong, uint, uint>? _packetResend;
 
     // set by the device, so we can tell whether a transfer is in progress
     private Func<bool>? _isStreaming;
@@ -233,6 +234,7 @@ internal class DeviceState
             Pack(1, specBitStart: 0, width: 1) |  // user_defined_name supported
             Pack(1, specBitStart: 1, width: 1) |  // serial_number supported
             Pack(1, specBitStart: 6, width: 1) |  // test packets carry LFSR data
+            Pack(1, specBitStart: 29, width: 1) | // PACKETRESEND supported
             Pack(1, specBitStart: 30, width: 1) | // WRITEMEM supported
             Pack(1, specBitStart: 31, width: 1);  // concatenation supported
         DefineUint(0x0934, RegAccess.ReadOnly, gvcpCapability);
@@ -805,6 +807,14 @@ internal class DeviceState
     public void OnControlChannelClosed(Action hook) => _controlChannelClosed = hook;
 
     public void OnFireTestPacket(Func<int, ushort> hook) => _fireTestPacket = hook;
+
+    public void OnPacketResend(Action<ushort, ulong, uint, uint> hook) => _packetResend = hook;
+
+    // PACKETRESEND_CMD, handed straight to whoever is streaming. nothing here
+    // gates it: the spec says a device answers a resend from any application,
+    // primary or not, and it never acknowledges one on the control channel.
+    public void PacketResend(ushort streamChannel, ulong blockId, uint firstPacketId, uint lastPacketId) =>
+        _packetResend?.Invoke(streamChannel, blockId, firstPacketId, lastPacketId);
 
     public void StreamingCheck(Func<bool> check) => _isStreaming = check;
 

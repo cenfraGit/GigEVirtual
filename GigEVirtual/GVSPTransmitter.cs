@@ -70,6 +70,25 @@ internal class GVSPTransmitter
     private ulong _block_id;
     private uint _packet_id;
 
+    // the packets of the blocks a resend request could still ask for. a real
+    // transmitter only holds a couple of blocks, which is exactly why the spec
+    // has status codes for a packet it has already thrown away.
+    private readonly Dictionary<ulong, byte[]?[]> _recent = [];
+    private readonly object _recentLock = new();
+
+    private const int RecentBlocks = 2;
+
+    // bit 15 of the gvsp flag field, which the spec numbers from the msb, so it
+    // is the low bit of the second flag byte
+    private const byte PacketResendFlag = 0x01;
+
+    // drops one packet in every n on the way out, so a resend request can
+    // actually be provoked. no real camera does this on purpose, which is the
+    // point: a lossy link is hard to arrange and easy to need. zero sends
+    // everything. the leader is never dropped, since a receiver cannot start a
+    // block without it.
+    public int DropOneIn { get; set; }
+
     private const int gvspHeaderSize = 20;
 
     private ImageSource _imageSource;
@@ -276,12 +295,120 @@ internal class GVSPTransmitter
         }
     }
 
+    // keeps this block's packets where a resend request can find them, dropping
+    // the oldest block once there are more than the transmitter holds on to
+    private byte[]?[] Remember(ulong blockId, int packets)
+    {
+        byte[]?[] kept = new byte[]?[packets];
+
+        lock (_recentLock)
+        {
+            _recent[blockId] = kept;
+
+            while (_recent.Count > RecentBlocks)
+                _recent.Remove(_recent.Keys.Min());
+        }
+
+        return kept;
+    }
+
+    // stores the packet where a resend can reach it, then puts it on the wire
+    // unless this is one the device was told to drop
+    private bool Emit(byte[]?[] kept, int packetId, byte[] packet, CancellationToken ct)
+    {
+        kept[packetId] = packet;
+
+        if (DropOneIn > 0 && packetId > 0 && packetId % DropOneIn == 0)
+            return !ct.IsCancellationRequested;
+
+        return Send(packet, ct);
+    }
+
+    // PACKETRESEND_CMD. there is no acknowledge on the control channel for this
+    // one: the answer is the packets themselves, on the stream channel.
+    public void Resend(ushort streamChannel, ulong blockId, uint firstPacketId, uint lastPacketId)
+    {
+        // one stream channel, so any other index is a block we never sent
+        if (streamChannel != 0) return;
+
+        byte[]?[]? kept;
+        ulong oldest;
+
+        lock (_recentLock)
+        {
+            _recent.TryGetValue(blockId, out kept);
+            oldest = _recent.Count > 0 ? _recent.Keys.Min() : 0;
+        }
+
+        // last_packet_id can mean everything up to the trailer, so a block we no
+        // longer have is answered once rather than by guessing how long it was
+        if (kept is null)
+        {
+            SendResendError(blockId, firstPacketId,
+                blockId < oldest
+                    ? GVCPStatus.GEV_STATUS_PACKET_AND_PREV_REMOVED_FROM_MEMORY
+                    : GVCPStatus.GEV_STATUS_PACKET_NOT_YET_AVAILABLE);
+            return;
+        }
+
+        if (firstPacketId >= kept.Length)
+        {
+            SendResendError(blockId, firstPacketId, GVCPStatus.GEV_STATUS_PACKET_UNAVAILABLE);
+            return;
+        }
+
+        // 0xFFFFFFFF asks for everything up to and including the trailer
+        uint last = Math.Min(lastPacketId, (uint)(kept.Length - 1));
+
+        Console.WriteLine($"[GVSP] resend block {blockId}, packets {firstPacketId}..{last}");
+
+        for (uint id = firstPacketId; id <= last; id++)
+        {
+            byte[]? packet = kept[id];
+
+            // the block is still going out and this packet is not built yet
+            if (packet is null)
+            {
+                SendResendError(blockId, id, GVCPStatus.GEV_STATUS_PACKET_NOT_YET_AVAILABLE);
+                continue;
+            }
+
+            // a receiver has to be able to tell a resent packet from a fresh one
+            byte[] copy = (byte[])packet.Clone();
+            copy[3] |= PacketResendFlag;
+
+            if (!Send(copy, CancellationToken.None)) return;
+            Pace();
+        }
+    }
+
+    // a packet we cannot resend still gets an answer: the same header with no
+    // data behind it and a status code saying why
+    private void SendResendError(ulong blockId, uint packetId, ushort status)
+    {
+        byte[] header = new byte[gvspHeaderSize];
+
+        BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(0, 2), status);
+        header[3] = PacketResendFlag;
+
+        // extended id. the packet format field does not matter on an error packet.
+        header[4] = 0b1000_0000;
+
+        BinaryPrimitives.WriteUInt64BigEndian(header.AsSpan(8, 8), blockId);
+        BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(16, 4), packetId);
+
+        Send(header, CancellationToken.None);
+    }
+
     private async Task Stream(CancellationTokenSource cts)
     {
         CancellationToken ct = cts.Token;
 
         // reset blockId
         _block_id = 1;
+
+        // block ids start again, so nothing kept from the last run can be asked for
+        lock (_recentLock) _recent.Clear();
 
         // when the next block is due. advancing this by the frame interval,
         // rather than sleeping a fixed amount after each block, keeps the frame
@@ -316,28 +443,31 @@ internal class GVSPTransmitter
             byte[] frame = _imageSource.NextFrame(_width, _height, _pixelFormat,
                                                   _settings.Brightness());
 
-            // build leader
-            byte[] leader = BuildDataLeader();
-            if (!Send(leader, ct)) return;
-            Pace();
-
-            // build data payload
             // spec says for data payload packets, the packet size
             // is IP header + UDP header + GVSP header
             int usablePayloadPerPacket = _packetSize - 20 - 8 - gvspHeaderSize;
-            byte[] payload;
+            int payloadPackets = (frame.Length + usablePayloadPerPacket - 1) / usablePayloadPerPacket;
+
+            // somewhere for a resend request to find this block. the leader and
+            // the trailer are packets too, so the count is the payloads plus two.
+            byte[]?[] kept = Remember(_block_id, payloadPackets + 2);
+
+            // build leader
+            if (!Emit(kept, 0, BuildDataLeader(), ct)) return;
+            Pace();
+
+            // build data payload
+            int packetId = 1;
 
             for (int i = 0; i < frame.Length; i += usablePayloadPerPacket)
             {
                 int chunkSize = Math.Min(usablePayloadPerPacket, frame.Length - i);
-                payload = BuildDataPayload(frame, i, chunkSize);
-                if (!Send(payload, ct)) return;
+                if (!Emit(kept, packetId++, BuildDataPayload(frame, i, chunkSize), ct)) return;
                 Pace();
             }
 
             // build trailer
-            byte[] trailer = BuildDataTrailer();
-            if (!Send(trailer, ct)) return;
+            if (!Emit(kept, packetId, BuildDataTrailer(), ct)) return;
 
             // increment for next block
             _block_id++;

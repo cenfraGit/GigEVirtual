@@ -217,6 +217,23 @@ internal class GVCPServer
                 $"length={length} " +
                 $"req_id={req_id}");
 
+            // PACKETRESEND is answered on the stream channel, never here, so it
+            // leaves before anything that would build or replay an acknowledge
+            if (command == GVCPMessages.PACKETRESEND_CMD)
+            {
+                if (ParsePacketResend(flag, payload) is not { } resend)
+                {
+                    PrintConsole($"PACKETRESEND_CMD is too short ({payload.Length} bytes), ignoring");
+                    continue;
+                }
+
+                PrintConsole($"PACKETRESEND channel={resend.Channel} block={resend.BlockId} " +
+                    $"packets={resend.First}..{resend.Last}");
+
+                _deviceState.PacketResend(resend.Channel, resend.BlockId, resend.First, resend.Last);
+                continue;
+            }
+
             // a repeated req_id from the same application means our answer never
             // arrived. send it again rather than running the command a second time
             if (_lastAck.TryGetValue(result.RemoteEndPoint, out var previous) && previous.ReqId == req_id)
@@ -350,6 +367,38 @@ internal class GVCPServer
     // this prints to the console. prepends "GVCP: " to message
     private static void PrintConsole(string message) =>
         Console.WriteLine($"GVCP: {message}");
+
+    // PACKETRESEND_CMD asks for packets of a block the receiver missed. it has no
+    // acknowledge of its own: the resent packets on the stream channel are the
+    // answer, and so are the error headers when they cannot be sent. null means
+    // the payload was too short to be one.
+    internal static (ushort Channel, ulong BlockId, uint First, uint Last)?
+        ParsePacketResend(byte flag, ReadOnlySpan<byte> payload)
+    {
+        // extended id is bit 3 of the flag byte, and the spec numbers bit 0 as
+        // the msb, so it is 0x10. it decides whether the block id is the 16 bits
+        // in the header or the 64 bits appended after the packet ids.
+        bool extendedId = (flag & 0x10) != 0;
+
+        if (payload.Length < (extendedId ? 20 : 12)) return null;
+
+        ushort channel = BinaryPrimitives.ReadUInt16BigEndian(payload.Slice(0, 2));
+        uint first = BinaryPrimitives.ReadUInt32BigEndian(payload.Slice(4, 4));
+        uint last = BinaryPrimitives.ReadUInt32BigEndian(payload.Slice(8, 4));
+
+        if (extendedId)
+            return (channel, BinaryPrimitives.ReadUInt64BigEndian(payload.Slice(12, 8)), first, last);
+
+        ulong blockId = BinaryPrimitives.ReadUInt16BigEndian(payload.Slice(2, 2));
+
+        // packet ids are 24 bits in standard mode, and all ones there means what
+        // all ones means in extended mode: everything up to the trailer
+        first &= 0x00FFFFFF;
+        last &= 0x00FFFFFF;
+        if (last == 0x00FFFFFF) last = uint.MaxValue;
+
+        return (channel, blockId, first, last);
+    }
 
     // --------------------------------------------------------------- ack builder methods
 

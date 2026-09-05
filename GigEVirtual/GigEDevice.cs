@@ -37,7 +37,17 @@ public abstract class GigEDevice
         // what is actually specific to it
         state.OnControlChannelClosed(() => Transmitter.StopAcquisition());
         state.OnFireTestPacket(Transmitter.SendTestPacket);
+        state.OnPacketResend(Transmitter.Resend);
         state.StreamingCheck(() => Transmitter.IsStreaming);
+    }
+
+    // tells the device to drop one stream packet in every n on the way out. no
+    // real camera has this knob, which is the point: a lossy link is the thing
+    // an application most needs to be tested against and the hardest to arrange.
+    public int DropOneIn
+    {
+        get => Transmitter.DropOneIn;
+        set => Transmitter.DropOneIn = value;
     }
 
     public Task Start() => _server.Start();

@@ -744,10 +744,16 @@ public class DeviceStateTests
         return value!;
     }
 
-    private static ulong PayloadSize(DeviceState state)
+    // an application is not allowed to ask for a resend unless the device says
+    // it can serve one, and that promise is bit 29 of the gvcp capability
+    // register. the spec numbers bit 0 as the msb, so it sits two up from the
+    // bottom of the word.
+    [Fact]
+    public void TheDeviceAdvertisesPacketResend()
     {
-        state.ReadRegister(0x0D34, out byte[]? high);
-        state.ReadRegister(0x0D38, out byte[]? low);
-        return ((ulong)ReadU32(high!) << 32) | ReadU32(low!);
+        DeviceState state = TestDevice.Bare();
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadRegister(0x0934, out byte[]? capability));
+        Assert.NotEqual(0u, ReadU32(capability!) & 0x00000004);
     }
 }
