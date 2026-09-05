@@ -41,8 +41,8 @@ public class DeviceStateTests
     {
         var state = new DeviceState();
 
-        // 0x0400 is the second url register, which we do not implement
-        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_ADDRESS, state.ReadRegister(0x0400, out _));
+        // nothing is mapped at the gvcp configuration register
+        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_ADDRESS, state.ReadRegister(0x0954, out _));
     }
 
     [Fact]
@@ -50,7 +50,7 @@ public class DeviceStateTests
     {
         DeviceState state = Controlled();
 
-        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_ADDRESS, state.WriteRegister(Controller, 0x0400, U32(1)));
+        Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_ADDRESS, state.WriteRegister(Controller, 0x0954, U32(1)));
     }
 
     [Fact]
@@ -99,6 +99,15 @@ public class DeviceStateTests
 
         // user-defined name ends at 0x00F8, nothing is mapped after it until 0x0200
         Assert.Equal(GVCPStatus.GEV_STATUS_INVALID_ADDRESS, state.ReadMemory(0x00E8, 32, out _));
+    }
+
+    [Fact]
+    public void SecondUrlRegisterExistsButIsEmpty()
+    {
+        var state = new DeviceState();
+
+        Assert.Equal(GVCPStatus.GEV_STATUS_SUCCESS, state.ReadMemory(0x0400, 512, out byte[]? url));
+        Assert.All(url!, b => Assert.Equal(0, b));
     }
 
     [Fact]

@@ -159,6 +159,10 @@ internal class DeviceState
         DefineString(xmlAddress, xmlLength, RegAccess.ReadOnly, xmlContent);
         DefineString(0x0200, 512, RegAccess.ReadOnly, firstUrl);
 
+        // second url. we only serve one xml, but applications read this register
+        // and it should come back empty rather than not existing
+        DefineString(0x0400, 512, RegAccess.ReadOnly, "");
+
         // number of network interfaces
         DefineUint(0x0600, RegAccess.ReadOnly, 1);
 
