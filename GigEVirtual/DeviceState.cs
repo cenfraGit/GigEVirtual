@@ -330,7 +330,8 @@ internal class DeviceState
 
     // --------------------------------------------------------------- register map
 
-    private Register Define(uint address, int length, RegAccess access, bool needsControl, bool selfClearing)
+    private Register Define(uint address, int length, RegAccess access, bool needsControl,
+                            bool selfClearing, Endianness endianness = Endianness.Big)
     {
         var register = new Register
         {
@@ -340,6 +341,7 @@ internal class DeviceState
             Access = access,
             NeedsControl = needsControl,
             SelfClearing = selfClearing,
+            Endianness = endianness,
         };
 
         register.Data = new byte[register.Length];
@@ -352,9 +354,12 @@ internal class DeviceState
     // bootstrap needs is already here by the time it gets a chance.
     public Register DefineUint(uint address, RegAccess access, uint value,
                                bool needsControl = true, bool selfClearing = false,
-                               Func<IPEndPoint, byte[], ushort>? onWrite = null)
+                               Func<IPEndPoint, byte[], ushort>? onWrite = null,
+                               Endianness endianness = Endianness.Big)
     {
-        Register register = Define(address, 4, access, needsControl, selfClearing);
+        // endianness has to be settled before the value goes in, or the default
+        // lands the wrong way round
+        Register register = Define(address, 4, access, needsControl, selfClearing, endianness);
         register.OnWrite = onWrite;
         PokeUint(address, value);
         return register;
@@ -413,8 +418,7 @@ internal class DeviceState
                 }
 
                 Define(register.Address, register.Length, register.Access,
-                       needsControl: true, selfClearing: false)
-                    .Endianness = register.Endianness;
+                       needsControl: true, selfClearing: false, register.Endianness);
                 added++;
             }
 
